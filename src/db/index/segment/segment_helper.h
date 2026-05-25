@@ -24,6 +24,7 @@
 #include "db/index/column/inverted_column/inverted_indexer.h"
 #include "db/index/common/index_filter.h"
 #include "db/index/common/meta.h"
+#include "roaring.hh"
 #include "segment.h"
 
 namespace zvec {
@@ -214,6 +215,16 @@ class SegmentHelper {
       std::function<BlockID()> &block_id_generator, uint64_t min_doc_id,
       uint64_t max_doc_id, uint32_t doc_count, int concurrency,
       std::vector<BlockMeta> *output_block_metas);
+
+  // Build a fresh FTS RocksDB under output_segment_path by streaming all
+  // FTS fields from input_segments through FtsRocksdbReducer.
+  //   - input_segments: ascending min_doc_id, contiguous doc_id range.
+  //   - delete_row_id_bitmap: deleted positions in input scan order
+  //     (shared with the vector path); empty for pure consolidation.
+  static Status ReduceFts(const CollectionSchema::Ptr &schema,
+                          const std::vector<Segment::Ptr> &input_segments,
+                          const std::string &output_segment_path,
+                          const roaring::Roaring &delete_row_id_bitmap);
 
   static arrow::Status FilterRecordBatch(
       const std::shared_ptr<arrow::RecordBatch> &batch,
