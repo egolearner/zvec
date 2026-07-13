@@ -95,7 +95,7 @@ from .model import schema as schema
 
 # —— Core data structures ——
 from .model.collection import Collection
-from .model.doc import Doc, DocList
+from .model.doc import Doc, DocList, GroupResult
 
 # —— Query & index parameters ——
 # —— FTS params (C++ binding) ——
@@ -161,6 +161,7 @@ __all__ = [
     "VectorSchema",
     "CollectionStats",
     # Parameters
+    "GroupResult",
     "Query",
     "VectorQuery",
     "Fts",
