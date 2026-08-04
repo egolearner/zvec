@@ -219,6 +219,9 @@ class Kmc2CentroidsGenerator {
          i += BatchCount) {
       ContextType::template BatchDistance<1>(matrix[i], bench,
                                              matrix.dimension(), &out[i]);
+      for (size_t j = 0; j < BatchCount; ++j) {
+        out[i + j] = ContextType::Kmc2Weight(out[i + j]);
+      }
     }
   }
 
@@ -229,6 +232,7 @@ class Kmc2CentroidsGenerator {
 
     for (size_t i = 0, n = cache.count(); i != n; ++i) {
       ContextType::Distance(bench, cache[i], cache.dimension(), &out[i]);
+      out[i] = ContextType::Kmc2Weight(out[i]);
     }
   }
 
@@ -246,7 +250,7 @@ class Kmc2CentroidsGenerator {
         min_score = new_score;
       }
     }
-    *out = min_score;
+    *out = ContextType::Kmc2Weight(min_score);
   }
 
   //! Select k benches randomly
@@ -464,6 +468,11 @@ class NumericalKmeansContext {
     SquaredEuclideanDistanceMatrix<ValueType, 1, 1>::Compute(m, q, dim, out);
   }
 
+  //! Convert a distance score to a non-negative K-MC2 sampling weight
+  static float Kmc2Weight(float score) {
+    return std::max(score, 0.0f);
+  }
+
   //! Transpose a matrix
   template <typename U>
   static auto MatrixTranspose(const U *src, size_t dim, T *dst) ->
@@ -653,6 +662,11 @@ class NibbleKmeansContext {
         reinterpret_cast<const uint8_t *>(q), dim, out);
   }
 
+  //! Convert a distance score to a non-negative K-MC2 sampling weight
+  static float Kmc2Weight(float score) {
+    return std::max(score, 0.0f);
+  }
+
   //! Transpose a matrix
   static void MatrixTranspose(const StoreType *src, size_t dim,
                               StoreType *dst) {
@@ -815,6 +829,14 @@ class NumericalInnerProductKmeansContext {
   static void Distance(const ValueType *m, const ValueType *q, size_t dim,
                        float *out) {
     MinusInnerProductMatrix<ValueType, 1, 1>::Compute(m, q, dim, out);
+  }
+
+  //! Convert -dot to cosine distance for spherical K-MC2 initialization
+  static float Kmc2Weight(float score) {
+    if constexpr (IsFloatingPoint<ValueType>::value) {
+      return std::max(score + 1.0f, 0.0f);
+    }
+    return score;
   }
 
   //! Transpose a matrix
@@ -1004,6 +1026,11 @@ class NibbleInnerProductKmeansContext {
     MinusInnerProductMatrix<uint8_t, 1, 1>::Compute(
         reinterpret_cast<const uint8_t *>(m),
         reinterpret_cast<const uint8_t *>(q), dim, out);
+  }
+
+  //! Preserve the existing integer inner-product K-MC2 score
+  static float Kmc2Weight(float score) {
+    return score;
   }
 
   //! Transpose a matrix

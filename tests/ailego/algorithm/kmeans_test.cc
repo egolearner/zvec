@@ -250,6 +250,16 @@ TEST(NumericalInnerProductKmeansContext, NormalizeFloatingPointCentroid) {
   EXPECT_FLOAT_EQ(centroid[1], 0.8f);
 }
 
+TEST(NumericalInnerProductKmeansContext, Kmc2UsesCosineDistanceAsWeight) {
+  using Context = ailego::NumericalInnerProductKmeansContext<float>;
+
+  EXPECT_FLOAT_EQ(0.0f, Context::Kmc2Weight(-1.0f));
+  EXPECT_FLOAT_EQ(0.25f, Context::Kmc2Weight(-0.75f));
+  EXPECT_FLOAT_EQ(1.0f, Context::Kmc2Weight(0.0f));
+  EXPECT_FLOAT_EQ(2.0f, Context::Kmc2Weight(1.0f));
+  EXPECT_FLOAT_EQ(0.0f, Context::Kmc2Weight(-1.000001f));
+}
+
 TEST(NumericalKmeans, FP16_General_InnerProduct) {
   const size_t DIMENSION = 20;
   const size_t K_VALUE = 20;
