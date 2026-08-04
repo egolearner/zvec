@@ -13,7 +13,10 @@
 // limitations under the License.
 
 #include <omp.h>
+#include <algorithm>
 #include <memory>
+#include <thread>
+#include <vector>
 #include <faiss/Clustering.h>
 #include <faiss/IndexFlat.h>
 #include <rabitqlib/index/ivf/ivf.hpp>
@@ -91,29 +94,56 @@ int main(int argc, char **argv) {
 
   omp_set_num_threads(1);
   std::vector<uint64_t> actual(queries.count * args.topk);
-  std::vector<rabitqlib::PID> labels(args.topk);
-  for (size_t nprobe : args.nprobes) {
-    size_t warmup = std::min(args.warmup, queries.count);
-    for (size_t i = 0; i < warmup; ++i) {
-      search_index->search(queries.values.data() + i * queries.dim, args.topk,
-                           nprobe, labels.data(), kUseHighAccuracySearch);
-    }
-    double best = std::numeric_limits<double>::max();
-    for (size_t repeat = 0; repeat < args.repeats; ++repeat) {
-      auto begin = std::chrono::steady_clock::now();
-      for (size_t i = 0; i < queries.count; ++i) {
-        search_index->search(queries.values.data() + i * queries.dim, args.topk,
-                             nprobe, labels.data(), kUseHighAccuracySearch);
-        std::copy(labels.begin(), labels.end(), actual.begin() + i * args.topk);
+  for (size_t sthreads : args.search_threads) {
+    for (size_t nprobe : args.nprobes) {
+      size_t warmup = std::min(args.warmup, queries.count);
+      {
+        std::vector<rabitqlib::PID> wlabels(args.topk);
+        for (size_t i = 0; i < warmup; ++i) {
+          search_index->search(queries.values.data() + i * queries.dim,
+                               args.topk, nprobe, wlabels.data(),
+                               kUseHighAccuracySearch);
+        }
       }
-      auto end = std::chrono::steady_clock::now();
-      best = std::min(best, Seconds(begin, end));
+
+      auto worker = [&](size_t begin, size_t end) {
+        std::vector<rabitqlib::PID> labels(args.topk);
+        for (size_t i = begin; i < end; ++i) {
+          search_index->search(queries.values.data() + i * queries.dim,
+                               args.topk, nprobe, labels.data(),
+                               kUseHighAccuracySearch);
+          std::copy(labels.begin(), labels.end(),
+                    actual.begin() + i * args.topk);
+        }
+      };
+
+      double best = std::numeric_limits<double>::max();
+      for (size_t repeat = 0; repeat < args.repeats; ++repeat) {
+        auto begin = std::chrono::steady_clock::now();
+        if (sthreads == 1) {
+          worker(0, queries.count);
+        } else {
+          std::vector<std::thread> pool;
+          pool.reserve(sthreads);
+          const size_t chunk = (queries.count + sthreads - 1) / sthreads;
+          for (size_t t = 0; t < sthreads; ++t) {
+            size_t b = std::min(t * chunk, queries.count);
+            size_t e = std::min(b + chunk, queries.count);
+            pool.emplace_back(worker, b, e);
+          }
+          for (auto &th : pool) {
+            th.join();
+          }
+        }
+        auto end = std::chrono::steady_clock::now();
+        best = std::min(best, Seconds(begin, end));
+      }
+      double recall = args.max_base == 0
+                          ? RecallAtK(actual, gt, queries.count, args.topk)
+                          : -1;
+      PrintSearch("rabitq_library", nprobe, queries.count, args.topk, sthreads,
+                  best, recall);
     }
-    double recall = args.max_base == 0
-                        ? RecallAtK(actual, gt, queries.count, args.topk)
-                        : -1;
-    PrintSearch("rabitq_library", nprobe, queries.count, args.topk, best,
-                recall);
   }
   return 0;
 }

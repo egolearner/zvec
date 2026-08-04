@@ -13,8 +13,11 @@
 // limitations under the License.
 
 #include <omp.h>
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 #include <faiss/IndexIVF.h>
 #include <faiss/IndexIVFRaBitQFastScan.h>
 #include <faiss/IndexPreTransform.h>
@@ -90,32 +93,55 @@ int main(int argc, char **argv) {
   std::vector<faiss::idx_t> labels(queries.count * args.topk);
   std::vector<float> distances(queries.count * args.topk);
   std::vector<uint64_t> actual(queries.count * args.topk);
-  for (size_t nprobe : args.nprobes) {
-    ivf->nprobe = nprobe;
-    size_t warmup = std::min(args.warmup, queries.count);
-    for (size_t i = 0; i < warmup; ++i) {
-      index->search(1, queries.values.data() + i * queries.dim,
-                    static_cast<faiss::idx_t>(args.topk), distances.data(),
-                    labels.data());
-    }
-    double best = std::numeric_limits<double>::max();
-    for (size_t repeat = 0; repeat < args.repeats; ++repeat) {
-      auto begin = std::chrono::steady_clock::now();
-      for (size_t i = 0; i < queries.count; ++i) {
+  const std::vector<size_t> &sthreads_list = args.search_threads;
+  for (size_t sthreads : sthreads_list) {
+    for (size_t nprobe : args.nprobes) {
+      ivf->nprobe = nprobe;
+      size_t warmup = std::min(args.warmup, queries.count);
+      for (size_t i = 0; i < warmup; ++i) {
         index->search(1, queries.values.data() + i * queries.dim,
-                      static_cast<faiss::idx_t>(args.topk),
-                      distances.data() + i * args.topk,
-                      labels.data() + i * args.topk);
+                      static_cast<faiss::idx_t>(args.topk), distances.data(),
+                      labels.data());
       }
-      auto end = std::chrono::steady_clock::now();
-      best = std::min(best, Seconds(begin, end));
+
+      auto worker = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+          index->search(1, queries.values.data() + i * queries.dim,
+                        static_cast<faiss::idx_t>(args.topk),
+                        distances.data() + i * args.topk,
+                        labels.data() + i * args.topk);
+        }
+      };
+
+      double best = std::numeric_limits<double>::max();
+      for (size_t repeat = 0; repeat < args.repeats; ++repeat) {
+        auto begin = std::chrono::steady_clock::now();
+        if (sthreads == 1) {
+          worker(0, queries.count);
+        } else {
+          std::vector<std::thread> pool;
+          pool.reserve(sthreads);
+          const size_t chunk = (queries.count + sthreads - 1) / sthreads;
+          for (size_t t = 0; t < sthreads; ++t) {
+            size_t b = std::min(t * chunk, queries.count);
+            size_t e = std::min(b + chunk, queries.count);
+            pool.emplace_back(worker, b, e);
+          }
+          for (auto &th : pool) {
+            th.join();
+          }
+        }
+        auto end = std::chrono::steady_clock::now();
+        best = std::min(best, Seconds(begin, end));
+      }
+      std::transform(labels.begin(), labels.end(), actual.begin(),
+                     [](faiss::idx_t id) { return static_cast<uint64_t>(id); });
+      double recall = args.max_base == 0
+                          ? RecallAtK(actual, gt, queries.count, args.topk)
+                          : -1;
+      PrintSearch("faiss", nprobe, queries.count, args.topk, sthreads, best,
+                  recall);
     }
-    std::transform(labels.begin(), labels.end(), actual.begin(),
-                   [](faiss::idx_t id) { return static_cast<uint64_t>(id); });
-    double recall = args.max_base == 0
-                        ? RecallAtK(actual, gt, queries.count, args.topk)
-                        : -1;
-    PrintSearch("faiss", nprobe, queries.count, args.topk, best, recall);
   }
   return 0;
 }

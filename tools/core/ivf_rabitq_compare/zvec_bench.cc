@@ -13,7 +13,11 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
+#include <string>
+#include <thread>
+#include <vector>
 #include <zvec/ailego/container/params.h>
 #include <zvec/core/framework/index_factory.h>
 #include <zvec/core/framework/index_holder.h>
@@ -193,47 +197,86 @@ int main(int argc, char **argv) {
   IndexQueryMeta query_meta(IndexMeta::DataType::DT_FP32,
                             static_cast<uint32_t>(queries.dim));
   std::vector<uint64_t> actual(queries.count * args.topk);
-  for (size_t nprobe : args.nprobes) {
-    auto context = streamer->create_context();
-    context->set_topk(static_cast<uint32_t>(args.topk));
-    zvec::ailego::Params search_params;
-    search_params.set(PARAM_IVF_RABITQ_NPROBE, static_cast<uint32_t>(nprobe));
-    search_params.set(PARAM_IVF_RABITQ_BRUTE_FORCE_THRESHOLD, 0U);
-    if (!Check(context->update(search_params), "zvec context update", &error)) {
-      return Fail(error);
-    }
-    size_t warmup = std::min(args.warmup, queries.count);
-    for (size_t i = 0; i < warmup; ++i) {
-      if (!Check(streamer->search_impl(queries.values.data() + i * queries.dim,
-                                       query_meta, context),
-                 "zvec warmup search", &error)) {
-        return Fail(error);
-      }
-    }
-    double best = std::numeric_limits<double>::max();
-    for (size_t repeat = 0; repeat < args.repeats; ++repeat) {
-      auto begin = std::chrono::steady_clock::now();
-      for (size_t i = 0; i < queries.count; ++i) {
-        if (!Check(
-                streamer->search_impl(queries.values.data() + i * queries.dim,
-                                      query_meta, context),
-                "zvec search", &error)) {
+  for (size_t sthreads : args.search_threads) {
+    for (size_t nprobe : args.nprobes) {
+      std::vector<IndexStreamer::Context::Pointer> contexts(sthreads);
+      for (size_t t = 0; t < sthreads; ++t) {
+        auto context = streamer->create_context();
+        context->set_topk(static_cast<uint32_t>(args.topk));
+        zvec::ailego::Params search_params;
+        search_params.set(PARAM_IVF_RABITQ_NPROBE,
+                          static_cast<uint32_t>(nprobe));
+        search_params.set(PARAM_IVF_RABITQ_BRUTE_FORCE_THRESHOLD, 0U);
+        if (!Check(context->update(search_params), "zvec context update",
+                   &error)) {
           return Fail(error);
         }
-        const auto &result = context->result();
-        for (size_t j = 0; j < args.topk; ++j) {
-          actual[i * args.topk + j] =
-              j < result.size() ? result[j].key()
-                                : std::numeric_limits<uint64_t>::max();
+        contexts[t] = std::move(context);
+      }
+
+      size_t warmup = std::min(args.warmup, queries.count);
+      for (size_t t = 0; t < sthreads; ++t) {
+        for (size_t i = 0; i < warmup; ++i) {
+          if (!Check(
+                  streamer->search_impl(queries.values.data() + i * queries.dim,
+                                        query_meta, contexts[t]),
+                  "zvec warmup search", &error)) {
+            return Fail(error);
+          }
         }
       }
-      auto end = std::chrono::steady_clock::now();
-      best = std::min(best, Seconds(begin, end));
+
+      std::atomic<bool> ok{true};
+      auto worker = [&](size_t t, size_t begin, size_t end) {
+        auto &context = contexts[t];
+        for (size_t i = begin; i < end; ++i) {
+          std::string local_error;
+          if (!Check(
+                  streamer->search_impl(queries.values.data() + i * queries.dim,
+                                        query_meta, context),
+                  "zvec search", &local_error)) {
+            ok.store(false);
+            return;
+          }
+          const auto &result = context->result();
+          for (size_t j = 0; j < args.topk; ++j) {
+            actual[i * args.topk + j] =
+                j < result.size() ? result[j].key()
+                                  : std::numeric_limits<uint64_t>::max();
+          }
+        }
+      };
+
+      double best = std::numeric_limits<double>::max();
+      for (size_t repeat = 0; repeat < args.repeats; ++repeat) {
+        auto begin = std::chrono::steady_clock::now();
+        if (sthreads == 1) {
+          worker(0, 0, queries.count);
+        } else {
+          std::vector<std::thread> pool;
+          pool.reserve(sthreads);
+          const size_t chunk = (queries.count + sthreads - 1) / sthreads;
+          for (size_t t = 0; t < sthreads; ++t) {
+            size_t b = std::min(t * chunk, queries.count);
+            size_t e = std::min(b + chunk, queries.count);
+            pool.emplace_back(worker, t, b, e);
+          }
+          for (auto &th : pool) {
+            th.join();
+          }
+        }
+        auto end = std::chrono::steady_clock::now();
+        if (!ok.load()) {
+          return Fail("zvec search");
+        }
+        best = std::min(best, Seconds(begin, end));
+      }
+      double recall = args.max_base == 0
+                          ? RecallAtK(actual, gt, queries.count, args.topk)
+                          : -1;
+      PrintSearch("zvec", nprobe, queries.count, args.topk, sthreads, best,
+                  recall);
     }
-    double recall = args.max_base == 0
-                        ? RecallAtK(actual, gt, queries.count, args.topk)
-                        : -1;
-    PrintSearch("zvec", nprobe, queries.count, args.topk, best, recall);
   }
   return 0;
 }
