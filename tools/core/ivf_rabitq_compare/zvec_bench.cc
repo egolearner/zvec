@@ -34,8 +34,9 @@ class VectorHolder final : public zvec::core::IndexHolder {
  public:
   class VectorIterator final : public zvec::core::IndexHolder::Iterator {
    public:
-    VectorIterator(const std::vector<float> &values, size_t count, size_t dim)
-        : values_(values), count_(count), dim_(dim) {}
+    VectorIterator(const std::vector<float> &values,
+                   const std::vector<uint64_t> &keys, size_t count, size_t dim)
+        : values_(values), keys_(keys), count_(count), dim_(dim) {}
 
     const void *data() const override {
       return values_.data() + offset_ * dim_;
@@ -46,7 +47,7 @@ class VectorHolder final : public zvec::core::IndexHolder {
     }
 
     uint64_t key() const override {
-      return offset_;
+      return keys_.empty() ? offset_ : keys_[offset_];
     }
 
     void next() override {
@@ -55,13 +56,15 @@ class VectorHolder final : public zvec::core::IndexHolder {
 
    private:
     const std::vector<float> &values_;
+    const std::vector<uint64_t> &keys_;
     size_t count_;
     size_t dim_;
     size_t offset_{0};
   };
 
-  VectorHolder(const std::vector<float> &values, size_t count, size_t dim)
-      : values_(values), count_(count), dim_(dim) {}
+  VectorHolder(const std::vector<float> &values,
+               const std::vector<uint64_t> &keys, size_t count, size_t dim)
+      : values_(values), keys_(keys), count_(count), dim_(dim) {}
 
   size_t count() const override {
     return count_;
@@ -84,11 +87,12 @@ class VectorHolder final : public zvec::core::IndexHolder {
   }
 
   Iterator::Pointer create_iterator() override {
-    return std::make_unique<VectorIterator>(values_, count_, dim_);
+    return std::make_unique<VectorIterator>(values_, keys_, count_, dim_);
   }
 
  private:
   const std::vector<float> &values_;
+  const std::vector<uint64_t> &keys_;
   size_t count_;
   size_t dim_;
 };
@@ -120,19 +124,19 @@ int main(int argc, char **argv) {
   Vecs<float> base;
   Vecs<float> queries;
   Vecs<int32_t> gt;
-  if (!LoadVecs(args.base, args.max_base, &base, &error) ||
-      !LoadVecs(args.query, args.max_queries, &queries, &error) ||
-      !LoadVecs(args.groundtruth, queries.count, &gt, &error)) {
+  if (!LoadDataset(args, &base, &queries, &gt, &error)) {
     return Fail(error);
   }
   if (base.dim != queries.dim || gt.count < queries.count ||
       args.topk > gt.dim) {
     return Fail("dataset dimensions/counts do not match");
   }
-  auto holder =
-      std::make_shared<VectorHolder>(base.values, base.count, base.dim);
+  auto holder = std::make_shared<VectorHolder>(base.values, base.keys,
+                                               base.count, base.dim);
   IndexMeta meta(IndexMeta::DataType::DT_FP32, static_cast<uint32_t>(base.dim));
-  meta.set_metric("SquaredEuclidean", 0, zvec::ailego::Params());
+  meta.set_metric(
+      args.metric == Metric::kCosine ? "InnerProduct" : "SquaredEuclidean", 0,
+      zvec::ailego::Params());
   zvec::ailego::Params params;
   params.set(PARAM_IVF_RABITQ_NLIST, static_cast<uint32_t>(args.nlist));
   params.set(PARAM_RABITQ_TOTAL_BITS, static_cast<uint32_t>(args.total_bits));
@@ -141,8 +145,8 @@ int main(int argc, char **argv) {
   size_t train_size = args.train_size == 0
                           ? std::min(base.count, args.nlist * 256)
                           : std::min(base.count, args.train_size);
-  auto train_holder =
-      std::make_shared<VectorHolder>(base.values, train_size, base.dim);
+  auto train_holder = std::make_shared<VectorHolder>(base.values, base.keys,
+                                                     train_size, base.dim);
   params.set(PARAM_IVF_RABITQ_BRUTE_FORCE_THRESHOLD, 0U);
 
   auto builder = std::make_shared<IvfRabitqBuilder>();
@@ -174,8 +178,8 @@ int main(int argc, char **argv) {
     return Fail(error);
   }
   auto dump_end = std::chrono::steady_clock::now();
-  PrintBuild("zvec", base.count, base.dim, args.threads,
-             Seconds(train_begin, train_end), 0,
+  PrintBuild("zvec", base.count, base.dim, MetricName(args.metric),
+             args.threads, Seconds(train_begin, train_end), 0,
              Seconds(encode_begin, encode_end), Seconds(dump_begin, dump_end));
   builder.reset();
 
@@ -274,8 +278,8 @@ int main(int argc, char **argv) {
       double recall = args.max_base == 0
                           ? RecallAtK(actual, gt, queries.count, args.topk)
                           : -1;
-      PrintSearch("zvec", nprobe, queries.count, args.topk, sthreads, best,
-                  recall);
+      PrintSearch("zvec", nprobe, queries.count, args.topk,
+                  MetricName(args.metric), sthreads, best, recall);
     }
   }
   return 0;

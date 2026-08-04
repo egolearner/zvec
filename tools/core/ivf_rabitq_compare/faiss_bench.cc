@@ -45,9 +45,7 @@ int main(int argc, char **argv) {
   Vecs<float> base;
   Vecs<float> queries;
   Vecs<int32_t> gt;
-  if (!LoadVecs(args.base, args.max_base, &base, &error) ||
-      !LoadVecs(args.query, args.max_queries, &queries, &error) ||
-      !LoadVecs(args.groundtruth, queries.count, &gt, &error)) {
+  if (!LoadDataset(args, &base, &queries, &gt, &error)) {
     return Fail(error);
   }
   if (base.dim != queries.dim || gt.count < queries.count ||
@@ -57,8 +55,11 @@ int main(int argc, char **argv) {
   omp_set_num_threads(static_cast<int>(args.threads));
   std::string factory = "HR,IVF" + std::to_string(args.nlist) + ",RaBitQfs" +
                         std::to_string(args.total_bits);
+  faiss::MetricType metric = args.metric == Metric::kCosine
+                                 ? faiss::METRIC_INNER_PRODUCT
+                                 : faiss::METRIC_L2;
   std::unique_ptr<faiss::Index> index(faiss::index_factory(
-      static_cast<int>(base.dim), factory.c_str(), faiss::METRIC_L2));
+      static_cast<int>(base.dim), factory.c_str(), metric));
   faiss::IndexIVFRaBitQFastScan *ivf = GetIvf(index.get());
   if (ivf == nullptr) {
     return Fail("factory did not create IndexIVFRaBitQFastScan");
@@ -79,9 +80,9 @@ int main(int argc, char **argv) {
   auto dump_begin = std::chrono::steady_clock::now();
   faiss::write_index(index.get(), args.index_path.c_str());
   auto dump_end = std::chrono::steady_clock::now();
-  PrintBuild("faiss", base.count, base.dim, args.threads,
-             Seconds(train_begin, train_end), 0, Seconds(add_begin, add_end),
-             Seconds(dump_begin, dump_end));
+  PrintBuild("faiss", base.count, base.dim, MetricName(args.metric),
+             args.threads, Seconds(train_begin, train_end), 0,
+             Seconds(add_begin, add_end), Seconds(dump_begin, dump_end));
 
   index.reset(faiss::read_index(args.index_path.c_str()));
   ivf = GetIvf(index.get());
@@ -135,12 +136,15 @@ int main(int argc, char **argv) {
         best = std::min(best, Seconds(begin, end));
       }
       std::transform(labels.begin(), labels.end(), actual.begin(),
-                     [](faiss::idx_t id) { return static_cast<uint64_t>(id); });
+                     [&](faiss::idx_t id) {
+                       return id < 0 ? std::numeric_limits<uint64_t>::max()
+                                     : KeyAt(base, static_cast<size_t>(id));
+                     });
       double recall = args.max_base == 0
                           ? RecallAtK(actual, gt, queries.count, args.topk)
                           : -1;
-      PrintSearch("faiss", nprobe, queries.count, args.topk, sthreads, best,
-                  recall);
+      PrintSearch("faiss", nprobe, queries.count, args.topk,
+                  MetricName(args.metric), sthreads, best, recall);
     }
   }
   return 0;

@@ -3,12 +3,16 @@
 This benchmark compares native 1-bit IVF-RaBitQ implementations in Zvec,
 Faiss (`HR,IVF<nlist>,RaBitQfs`), and RaBitQ-Library.
 
-All three executables load the same `.fvecs` base/query files and `.ivecs`
-ground truth, use L2 distance, one query per search call, identical `topk`,
-`nprobe`, build thread count, and the same first `train-size` base vectors for
-training. They use 20 KMeans iterations, matching Zvec's current fixed
-OptKMeans limit, where the implementation exposes that setting. Search is
-always one query per call and therefore single-threaded.
+All three executables load the same dataset, use the same distance, one query
+per search call, identical `topk`, `nprobe`, build thread count, and the same
+first `train-size` base vectors for training. The default input is
+`.fvecs`/`.ivecs` with L2 distance. The Cohere 1M mode reads Zvec's internal
+vecs base file and the original text query/ground-truth files. For cosine, the
+common loader L2-normalizes base and query vectors once, then all three
+implementations use their inner-product path; this is mathematically
+equivalent to cosine similarity and keeps preprocessing outside measured
+build/search time. They use 20 KMeans iterations, matching Zvec's current fixed
+OptKMeans limit, where the implementation exposes that setting.
 
 Zvec's IVF-RaBitQ builder uses its configured builder thread count to create
 internal `IndexThreads` for KMeans training, centroid assignment, and cluster
@@ -82,6 +86,19 @@ python tools/core/ivf_rabitq_compare/hdf5_to_vecs.py \
 This produces `/data/gist/base.fvecs`, `/data/gist/query.fvecs`, and
 `/data/gist/groundtruth.ivecs`.
 
+## Prepare Cohere 1M
+
+The Cohere mode expects these files in one directory:
+
+```text
+cohere_train_vector_1m.new.zvec.vecs
+cohere_test_vector_1m.1000.new.txt
+neighbors.txt
+```
+
+The directory is not hard-coded. Select the dataset with
+`--dataset cohere-1m` and pass its location with `--dataset-dir`.
+
 ## Run
 
 Use the same arguments for each executable:
@@ -104,6 +121,28 @@ build.ivf-rabitq-compare/ivf_rabitq_faiss_bench $COMMON_ARGS \
   --index /tmp/faiss-gist.ivf-rabitq
 build.ivf-rabitq-compare/ivf_rabitq_library_bench $COMMON_ARGS \
   --index /tmp/rabitq-library-gist.ivf-rabitq
+```
+
+Run Cohere 1M with cosine using the same configurable data directory on every
+machine:
+
+```bash
+DATASET_DIR=/path/to/1m_zvec
+THREADS=$(nproc)
+export OMP_NUM_THREADS=$THREADS
+export OPENBLAS_NUM_THREADS=$THREADS
+
+COMMON_ARGS="--dataset cohere-1m --dataset-dir $DATASET_DIR \
+--nlist 1024 --train-size 262144 --niters 20 \
+--nprobes 1,2,4,8,16,32,64,128,256 \
+--topk 10 --threads $THREADS --repeats 3 --warmup 20"
+
+build.release/bin/ivf_rabitq_zvec_bench $COMMON_ARGS \
+  --index /tmp/zvec-cohere-1m.ivf-rabitq
+build.ivf-rabitq-compare/ivf_rabitq_faiss_bench $COMMON_ARGS \
+  --index /tmp/faiss-cohere-1m.ivf-rabitq
+build.ivf-rabitq-compare/ivf_rabitq_library_bench $COMMON_ARGS \
+  --index /tmp/rabitq-library-cohere-1m.ivf-rabitq
 ```
 
 Each build record reports `build_seconds` without serialization and

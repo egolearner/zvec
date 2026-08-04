@@ -39,9 +39,7 @@ int main(int argc, char **argv) {
   Vecs<float> base;
   Vecs<float> queries;
   Vecs<int32_t> gt;
-  if (!LoadVecs(args.base, args.max_base, &base, &error) ||
-      !LoadVecs(args.query, args.max_queries, &queries, &error) ||
-      !LoadVecs(args.groundtruth, queries.count, &gt, &error)) {
+  if (!LoadDataset(args, &base, &queries, &gt, &error)) {
     return Fail(error);
   }
   if (base.dim != queries.dim || gt.count < queries.count ||
@@ -57,25 +55,36 @@ int main(int argc, char **argv) {
   clustering.niter = static_cast<int>(args.niters);
   clustering.seed = 12345;
   clustering.verbose = false;
-  faiss::IndexFlatL2 coarse(static_cast<faiss::idx_t>(base.dim));
+  clustering.spherical = args.metric == Metric::kCosine;
+  std::unique_ptr<faiss::IndexFlat> coarse;
+  if (args.metric == Metric::kCosine) {
+    coarse = std::make_unique<faiss::IndexFlatIP>(
+        static_cast<faiss::idx_t>(base.dim));
+  } else {
+    coarse = std::make_unique<faiss::IndexFlatL2>(
+        static_cast<faiss::idx_t>(base.dim));
+  }
   auto train_begin = std::chrono::steady_clock::now();
   clustering.train(static_cast<faiss::idx_t>(train_size), base.values.data(),
-                   coarse);
+                   *coarse);
   auto train_end = std::chrono::steady_clock::now();
 
   std::vector<faiss::idx_t> assignment64(base.count);
   std::vector<float> coarse_distances(base.count);
   auto assign_begin = std::chrono::steady_clock::now();
-  coarse.search(static_cast<faiss::idx_t>(base.count), base.values.data(), 1,
-                coarse_distances.data(), assignment64.data());
+  coarse->search(static_cast<faiss::idx_t>(base.count), base.values.data(), 1,
+                 coarse_distances.data(), assignment64.data());
   auto assign_end = std::chrono::steady_clock::now();
   std::vector<rabitqlib::PID> assignments(base.count);
   std::transform(
       assignment64.begin(), assignment64.end(), assignments.begin(),
       [](faiss::idx_t id) { return static_cast<rabitqlib::PID>(id); });
 
+  rabitqlib::MetricType metric = args.metric == Metric::kCosine
+                                     ? rabitqlib::METRIC_IP
+                                     : rabitqlib::METRIC_L2;
   auto index = std::make_unique<rabitqlib::ivf::IVF>(
-      base.count, base.dim, args.nlist, args.total_bits, rabitqlib::METRIC_L2,
+      base.count, base.dim, args.nlist, args.total_bits, metric,
       rabitqlib::RotatorType::FhtKacRotator);
   auto encode_begin = std::chrono::steady_clock::now();
   index->construct(base.values.data(), clustering.centroids.data(),
@@ -84,8 +93,9 @@ int main(int argc, char **argv) {
   auto dump_begin = std::chrono::steady_clock::now();
   index->save(args.index_path.c_str());
   auto dump_end = std::chrono::steady_clock::now();
-  PrintBuild("rabitq_library", base.count, base.dim, args.threads,
-             Seconds(train_begin, train_end), Seconds(assign_begin, assign_end),
+  PrintBuild("rabitq_library", base.count, base.dim, MetricName(args.metric),
+             args.threads, Seconds(train_begin, train_end),
+             Seconds(assign_begin, assign_end),
              Seconds(encode_begin, encode_end), Seconds(dump_begin, dump_end));
 
   index.reset();
@@ -112,8 +122,11 @@ int main(int argc, char **argv) {
           search_index->search(queries.values.data() + i * queries.dim,
                                args.topk, nprobe, labels.data(),
                                kUseHighAccuracySearch);
-          std::copy(labels.begin(), labels.end(),
-                    actual.begin() + i * args.topk);
+          std::transform(labels.begin(), labels.end(),
+                         actual.begin() + i * args.topk,
+                         [&](rabitqlib::PID id) {
+                           return KeyAt(base, static_cast<size_t>(id));
+                         });
         }
       };
 
@@ -141,8 +154,8 @@ int main(int argc, char **argv) {
       double recall = args.max_base == 0
                           ? RecallAtK(actual, gt, queries.count, args.topk)
                           : -1;
-      PrintSearch("rabitq_library", nprobe, queries.count, args.topk, sthreads,
-                  best, recall);
+      PrintSearch("rabitq_library", nprobe, queries.count, args.topk,
+                  MetricName(args.metric), sthreads, best, recall);
     }
   }
   return 0;
