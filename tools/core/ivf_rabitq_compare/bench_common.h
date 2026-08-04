@@ -43,6 +43,7 @@ struct Args {
   size_t repeats{3};
   size_t warmup{20};
   size_t niters{20};
+  size_t total_bits{1};
   std::vector<size_t> nprobes{1, 2, 4, 8, 16, 32, 64, 128, 256};
 };
 
@@ -158,6 +159,13 @@ inline bool ParseArgs(int argc, char **argv, Args *args, std::string *error) {
     } else if (name == "--niters") {
       if (!ParseSize(value, "niters", false, &parsed.niters, error)) {
         return false;
+      }
+    } else if (name == "--total-bits") {
+      if (!ParseSize(value, "total-bits", false, &parsed.total_bits, error)) {
+        return false;
+      }
+      if (parsed.total_bits < 1 || parsed.total_bits > 9) {
+        return SetError("total-bits must be in [1, 9]", error);
       }
     } else if (name == "--nprobes") {
       if (!ParseSizes(value, &parsed.nprobes, error)) {
