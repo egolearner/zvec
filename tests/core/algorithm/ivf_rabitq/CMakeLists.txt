@@ -27,8 +27,30 @@ foreach(CC_SRCS ${ALL_TEST_SRCS})
       ${CMAKE_THREAD_LIBS_INIT}
       ${CMAKE_DL_LIBS}
       SRCS ${CC_SRCS}
-      INCS . ${PROJECT_ROOT_DIR}/src/core ${PROJECT_ROOT_DIR}/src/core/algorithm/ivf_rabitq ${PROJECT_ROOT_DIR}/src/core/algorithm/hnsw_rabitq
+      INCS . ${PROJECT_ROOT_DIR}/src/core ${PROJECT_ROOT_DIR}/src/core/algorithm/ivf_rabitq ${PROJECT_ROOT_DIR}/src/core/algorithm/hnsw_rabitq ${PROJECT_ROOT_DIR}/tools/core/ivf_rabitq_compare
       LDFLAGS ${APPLE_FRAMEWORK_LIBS}
     )
   cc_test_suite(ivf_rabitq ${CC_TARGET})
 endforeach()
+
+cc_binary(
+    NAME ivf_rabitq_zvec_bench
+    STRICT PACKED
+    SRCS ${PROJECT_ROOT_DIR}/tools/core/ivf_rabitq_compare/zvec_bench.cc
+    INCS
+      .
+      ${PROJECT_ROOT_DIR}/src/core/
+      ${PROJECT_ROOT_DIR}/src/core/algorithm/ivf_rabitq/
+      ${PROJECT_ROOT_DIR}/src/core/algorithm/hnsw_rabitq/
+      ${PROJECT_ROOT_DIR}/tools/core/ivf_rabitq_compare/
+    LIBS
+      core_framework
+      core_utility
+      core_metric
+      core_quantizer
+      core_knn_cluster
+      core_knn_ivf
+      core_knn_hnsw_rabitq
+      core_knn_ivf_rabitq
+      zvec_ailego
+)
