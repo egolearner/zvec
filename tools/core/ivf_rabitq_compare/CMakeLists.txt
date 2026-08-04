@@ -46,6 +46,7 @@ if(NOT FAISS_OPT_LEVEL STREQUAL "avx2"
 endif()
 
 find_package(OpenMP REQUIRED)
+include("${ZVEC_ROOT}/cmake/utils.cmake")
 add_subdirectory("${FAISS_ROOT}" "${CMAKE_BINARY_DIR}/faiss" EXCLUDE_FROM_ALL)
 add_subdirectory("${ZVEC_ROOT}/thirdparty/RaBitQ-Library"
                  "${CMAKE_BINARY_DIR}/rabitq-library" EXCLUDE_FROM_ALL)

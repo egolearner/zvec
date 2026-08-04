@@ -40,6 +40,7 @@ struct Args {
   size_t max_queries{0};
   size_t topk{10};
   size_t threads{std::max(std::thread::hardware_concurrency(), 1U)};
+  std::vector<size_t> search_threads{1};
   size_t repeats{3};
   size_t warmup{20};
   size_t niters{20};
@@ -146,6 +147,10 @@ inline bool ParseArgs(int argc, char **argv, Args *args, std::string *error) {
       }
     } else if (name == "--threads") {
       if (!ParseSize(value, "threads", false, &parsed.threads, error)) {
+        return false;
+      }
+    } else if (name == "--search-threads") {
+      if (!ParseSizes(value, &parsed.search_threads, error)) {
         return false;
       }
     } else if (name == "--repeats") {
@@ -283,11 +288,13 @@ inline void PrintBuild(const char *engine, size_t count, size_t dim,
 }
 
 inline void PrintSearch(const char *engine, size_t nprobe, size_t query_count,
-                        size_t topk, double seconds, double recall) {
+                        size_t topk, size_t search_threads, double seconds,
+                        double recall) {
   std::cout << std::fixed << std::setprecision(6)
             << "{\"type\":\"search\",\"engine\":\"" << engine
             << "\",\"nprobe\":" << nprobe << ",\"queries\":" << query_count
-            << ",\"topk\":" << topk << ",\"threads\":1,\"seconds\":" << seconds
+            << ",\"topk\":" << topk << ",\"threads\":" << search_threads
+            << ",\"seconds\":" << seconds
             << ",\"qps\":" << static_cast<double>(query_count) / seconds
             << ",\"recall_at_k\":";
   if (recall < 0) {
