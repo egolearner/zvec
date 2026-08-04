@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
   meta.set_metric("SquaredEuclidean", 0, zvec::ailego::Params());
   zvec::ailego::Params params;
   params.set(PARAM_IVF_RABITQ_NLIST, static_cast<uint32_t>(args.nlist));
-  params.set(PARAM_RABITQ_TOTAL_BITS, 1U);
+  params.set(PARAM_RABITQ_TOTAL_BITS, static_cast<uint32_t>(args.total_bits));
   params.set(PARAM_IVF_RABITQ_BUILDER_THREAD_COUNT,
              static_cast<uint32_t>(args.threads));
   size_t train_size = args.train_size == 0

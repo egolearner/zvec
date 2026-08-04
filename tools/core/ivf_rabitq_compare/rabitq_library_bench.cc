@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
       [](faiss::idx_t id) { return static_cast<rabitqlib::PID>(id); });
 
   auto index = std::make_unique<rabitqlib::ivf::IVF>(
-      base.count, base.dim, args.nlist, 1, rabitqlib::METRIC_L2,
+      base.count, base.dim, args.nlist, args.total_bits, rabitqlib::METRIC_L2,
       rabitqlib::RotatorType::FhtKacRotator);
   auto encode_begin = std::chrono::steady_clock::now();
   index->construct(base.values.data(), clustering.centroids.data(),

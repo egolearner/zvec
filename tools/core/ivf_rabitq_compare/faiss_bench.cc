@@ -52,7 +52,8 @@ int main(int argc, char **argv) {
     return Fail("dataset dimensions/counts do not match");
   }
   omp_set_num_threads(static_cast<int>(args.threads));
-  std::string factory = "HR,IVF" + std::to_string(args.nlist) + ",RaBitQfs";
+  std::string factory = "HR,IVF" + std::to_string(args.nlist) + ",RaBitQfs" +
+                        std::to_string(args.total_bits);
   std::unique_ptr<faiss::Index> index(faiss::index_factory(
       static_cast<int>(base.dim), factory.c_str(), faiss::METRIC_L2));
   faiss::IndexIVFRaBitQFastScan *ivf = GetIvf(index.get());
