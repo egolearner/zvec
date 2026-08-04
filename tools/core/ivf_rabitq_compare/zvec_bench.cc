@@ -179,8 +179,9 @@ int main(int argc, char **argv) {
   if (storage == nullptr) {
     return Fail("cannot create zvec MMapFileReadStorage");
   }
-  if (!Check(storage->init(zvec::ailego::Params()), "zvec storage init",
-             &error) ||
+  zvec::ailego::Params storage_params;
+  storage_params.set("proxima.mmap_file.container.memory_warmup", true);
+  if (!Check(storage->init(storage_params), "zvec storage init", &error) ||
       !Check(storage->open(index_path, false), "zvec storage open", &error)) {
     return Fail(error);
   }
