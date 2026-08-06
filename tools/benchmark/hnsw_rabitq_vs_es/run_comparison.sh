@@ -33,8 +33,8 @@ Actions:
   all        Inspect, build, and search both engines (default).
 
 Machine-specific options:
-  --dataset PATH       ANN-Benchmarks HDF5 file. Required; may also be set
-                       with ZVEC_BENCH_DATASET.
+  --dataset PATH       ANN-Benchmarks HDF5 file or Cohere Parquet directory.
+                       Required; may also be set with ZVEC_BENCH_DATASET.
   --work-dir PATH      Index and result directory. Required; may also be set
                        with ZVEC_BENCH_WORK_DIR.
   --cpus LIST          taskset CPU list, for example 0,2,4,6. Required for
@@ -292,8 +292,8 @@ if [[ "${ACTION}" != "start-es" && "${ACTION}" != "stop-es" ]]; then
   if [[ -z "${WORK_DIR}" ]]; then
     fail_usage "--work-dir or ZVEC_BENCH_WORK_DIR is required"
   fi
-  if [[ ! -f "${DATASET}" ]]; then
-    fail_usage "dataset does not exist: ${DATASET}"
+  if [[ ! -f "${DATASET}" && ! -d "${DATASET}" ]]; then
+    fail_usage "dataset path does not exist: ${DATASET}"
   fi
 fi
 

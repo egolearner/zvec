@@ -1,4 +1,4 @@
-# 在其他机器运行 GIST-1M 1-bit 对比
+# 在其他机器运行 GIST-1M / Cohere-1M 1-bit 对比
 
 本文说明如何在一台新的 Linux 机器上，从零运行：
 
@@ -51,12 +51,36 @@ export PYTHONPATH="$PWD/python:$PWD/build.release/lib"
 
 ## 3. 准备数据
 
-将 `gist-960-euclidean.hdf5` 放到本机任意位置。路径不要求与原测试机相同，例如：
+数据可以放到本机任意位置，路径不要求与原测试机相同。
+
+GIST-1M：
 
 ```bash
 export ZVEC_BENCH_DATASET=/mnt/ann-data/gist-960-euclidean.hdf5
 export ZVEC_BENCH_WORK_DIR=/mnt/ann-results/gist-one-bit
+export ZVEC_BENCH_ES_INDEX=gist-hnsw-bbq
 ```
+
+Cohere-1M：
+
+```bash
+export ZVEC_BENCH_DATASET=/mnt/ann-data/cohere_medium_1m
+export ZVEC_BENCH_WORK_DIR=/mnt/ann-results/cohere-one-bit
+export ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
+```
+
+Cohere 路径必须是包含下列文件的目录：
+
+```text
+cohere_medium_1m/
+├── shuffle_train.parquet
+├── test.parquet
+└── neighbors.parquet
+```
+
+目录中允许存在 `neighbors_head_1p.parquet`、`neighbors_tail_1p.parquet` 等其他
+文件，但实验和数据签名只使用上面三个文件。不同数据集必须使用不同 work-dir
+和 ES index，避免误复用 manifest 或索引。
 
 结果目录应位于空间充足的本地磁盘。数据和结果路径包含空格也可以，脚本内部会
 按独立参数传递。
@@ -67,13 +91,24 @@ export ZVEC_BENCH_WORK_DIR=/mnt/ann-results/gist-one-bit
 bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh inspect
 ```
 
-预期关键信息：
+GIST 预期关键信息：
 
 ```text
 base_count: 1000000
 query_count: 1000
 dimension: 960
 distance: euclidean
+```
+
+Cohere 预期为：
+
+```text
+base_count: 1000000
+query_count: 1000
+dimension: 768
+groundtruth_k: 1000
+distance: cosine
+dataset_format: cohere-parquet
 ```
 
 ## 4. 选择 CPU
@@ -124,8 +159,8 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh smoke \
 4. 停止由脚本启动的 ES 容器；
 5. 保留容器、Docker volume、索引和结果目录。
 
-smoke 会自动使用 `${ZVEC_BENCH_WORK_DIR}/smoke` 和索引名
-`gist-hnsw-bbq-smoke`，不会污染后续完整 1M 实验。
+smoke 会自动使用 `${ZVEC_BENCH_WORK_DIR}/smoke` 和
+`${ZVEC_BENCH_ES_INDEX}-smoke`，不会污染后续完整 1M 实验。
 
 脚本创建的容器带有 image、端口、volume、CPU 和 JVM 配置签名。再次使用同名
 容器时签名必须一致；如果修改了这些参数，请同时指定新的 `--es-container` 和
@@ -138,7 +173,7 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh smoke \
   --overwrite --dry-run
 ```
 
-## 6. 运行完整 GIST-1M 1-bit 对比
+## 6. 运行完整 1M 1-bit 对比
 
 ```bash
 bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
@@ -187,15 +222,15 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
 
 ## 8. 数据换路径或复制到另一台机器
 
-全新实验只需要修改：
+全新实验只需要把数据路径指向本机的 HDF5 文件或 Cohere 目录：
 
 ```bash
-export ZVEC_BENCH_DATASET=/new/path/gist-960-euclidean.hdf5
-export ZVEC_BENCH_WORK_DIR=/new/path/gist-one-bit-results
+export ZVEC_BENCH_DATASET=/new/path/cohere_medium_1m
+export ZVEC_BENCH_WORK_DIR=/new/path/cohere-one-bit-results
+export ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
 ```
 
-如果只在同一台机器移动 HDF5，而 work-dir 和 ES Docker volume 都还在，search
-时使用：
+如果只移动数据文件/目录，而 work-dir 和 ES Docker volume 都还在，search 时使用：
 
 ```bash
 bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
@@ -204,7 +239,7 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
 
 跨机器时需要区分两种索引的存储位置：
 
-- Zvec collection 位于 work-dir。复制 HDF5 和整个 work-dir 后，可以直接运行：
+- Zvec collection 位于 work-dir。复制数据和整个 work-dir 后，可以直接运行：
 
   ```bash
   bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
@@ -229,18 +264,20 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
 如果 ES 是共享的远端服务，只需确认目标 index 仍存在，并使用
 `--skip-docker --es-url ...`。
 
-该选项只忽略 manifest 中数据文件的绝对路径和 mtime 差异，仍严格检查：
+该选项只忽略 manifest 中数据的绝对路径和 mtime 差异，仍严格检查：
 
-- 完整文件 SHA-256
-- 文件大小
+- 完整数据 SHA-256
+- 数据总大小
+- 数据格式
 - 距离类型
 - base/query 数量
 - 向量维度
 - ground-truth 宽度
 
 SHA-256 会写入新 manifest；旧 manifest 没有该字段时，relocation 会拒绝继续，
-需要重新构建一次。每次启动 benchmark 都会顺序读取 HDF5 计算哈希，这也会让数据
-进入 page cache，哈希时间不计入引擎构建或检索 QPS。
+需要重新构建一次。每次启动 benchmark 都会顺序读取 HDF5 或 Cohere 的三个
+Parquet 文件计算哈希，这也会让数据进入 page cache，哈希时间不计入引擎构建或
+检索 QPS。
 
 ## 9. 使用已有或远端 Elasticsearch
 
@@ -277,14 +314,15 @@ export ES_PASSWORD=...
 
 ```bash
 bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
-  --dataset /data/gist.hdf5 \
-  --work-dir /data/results/gist-one-bit \
+  --dataset /data/cohere_medium_1m \
+  --work-dir /data/results/cohere-one-bit \
   --cpus 0,2,4,6,8,10,12,14 \
   --build-threads 8 \
   --search-threads 1,4,8 \
   --es-port 29200 \
-  --es-container gist-es-29200 \
-  --es-volume gist-es-data-29200 \
+  --es-index cohere-medium-1m-hnsw-bbq \
+  --es-container cohere-es-29200 \
+  --es-volume cohere-es-data-29200 \
   --overwrite
 ```
 

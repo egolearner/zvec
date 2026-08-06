@@ -14,9 +14,10 @@
 # limitations under the License.
 """Compare Zvec HNSW-RaBitQ with Elasticsearch BBQ-HNSW.
 
-The benchmark consumes an ANN-Benchmarks HDF5 dataset directly. Build and
-search can run independently so the persisted indexes can be built once and
-searched repeatedly under controlled CPU and memory conditions.
+The benchmark consumes ANN-Benchmarks HDF5 files or the Cohere Parquet
+directory layout. Build and search can run independently so the persisted
+indexes can be built once and searched repeatedly under controlled CPU and
+memory conditions.
 """
 # This command-line benchmark intentionally prints progress and JSON records.
 # Optional engine dependencies are imported lazily so inspect/build modes stay independent.
@@ -48,6 +49,13 @@ ZVEC_MARKER = ".hnsw_rabitq_vs_es_benchmark"
 MANIFEST_NAME = "manifest.json"
 RESULTS_NAME = "search-results.jsonl"
 MIN_ELASTICSEARCH_VERSION = (8, 18, 0)
+ANN_BENCHMARKS_FORMAT = "ann-benchmarks-hdf5"
+COHERE_PARQUET_FORMAT = "cohere-parquet"
+COHERE_DATA_FILES = (
+    "shuffle_train.parquet",
+    "test.parquet",
+    "neighbors.parquet",
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,7 @@ class DatasetInfo:
     query_count: int
     dimension: int
     groundtruth_k: int
+    dataset_format: str = ANN_BENCHMARKS_FORMAT
 
 
 @dataclass
@@ -109,6 +118,18 @@ def import_h5py():
             "h5py is required; install the benchmark requirements first"
         ) from exc
     return h5py
+
+
+def import_pyarrow():
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyarrow is required for Cohere Parquet datasets; install the "
+            "benchmark requirements first"
+        ) from exc
+    return pa, pq
 
 
 def configure_local_zvec_path() -> None:
@@ -211,6 +232,27 @@ def dataset_slice(dataset: Any, start: int, stop: int) -> np.ndarray:
     return np.ascontiguousarray(dataset[start:stop], dtype=np.float32)
 
 
+def dataset_paths(path: Path) -> list[tuple[str, Path]]:
+    if path.is_file():
+        return [(path.name, path)]
+    if path.is_dir():
+        files = [(name, path / name) for name in COHERE_DATA_FILES]
+        missing = [name for name, file_path in files if not file_path.is_file()]
+        if missing:
+            raise RuntimeError(
+                f"Cohere dataset directory is missing files: {sorted(missing)}"
+            )
+        return files
+    raise RuntimeError(f"dataset path does not exist: {path}")
+
+
+def dataset_file_stats(path: Path) -> dict[str, tuple[int, int]]:
+    return {
+        name: (file_path.stat().st_size, file_path.stat().st_mtime_ns)
+        for name, file_path in dataset_paths(path)
+    }
+
+
 def file_sha256(path: Path, chunk_size: int = 16 * 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -219,11 +261,33 @@ def file_sha256(path: Path, chunk_size: int = 16 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def inspect_dataset(path: Path) -> DatasetInfo:
-    if not path.is_file():
-        raise RuntimeError(f"dataset does not exist: {path}")
-    stat = path.stat()
-    sha256 = file_sha256(path)
+def dataset_fingerprint(path: Path) -> tuple[int, int, str]:
+    files = dataset_paths(path)
+    initial_stats = dataset_file_stats(path)
+    if len(files) == 1:
+        sha256 = file_sha256(files[0][1])
+    else:
+        digest = hashlib.sha256()
+        for name, file_path in files:
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            with file_path.open("rb") as source:
+                while chunk := source.read(16 * 1024 * 1024):
+                    digest.update(chunk)
+            digest.update(b"\0")
+        sha256 = digest.hexdigest()
+    current_stats = dataset_file_stats(path)
+    if current_stats != initial_stats:
+        raise RuntimeError(f"dataset changed while it was being inspected: {path}")
+    return (
+        sum(size for size, _mtime_ns in initial_stats.values()),
+        max(mtime_ns for _size, mtime_ns in initial_stats.values()),
+        sha256,
+    )
+
+
+def inspect_hdf5_dataset(path: Path) -> DatasetInfo:
+    file_size, mtime_ns, sha256 = dataset_fingerprint(path)
     h5py = import_h5py()
     with h5py.File(path, "r") as source:
         required = {"train", "test", "neighbors"}
@@ -260,16 +324,10 @@ def inspect_dataset(path: Path) -> DatasetInfo:
                 f"this benchmark currently supports only Euclidean distance, got "
                 f"{distance!r}"
             )
-        current_stat = path.stat()
-        if (
-            current_stat.st_size != stat.st_size
-            or current_stat.st_mtime_ns != stat.st_mtime_ns
-        ):
-            raise RuntimeError(f"dataset changed while it was being inspected: {path}")
         return DatasetInfo(
             path=str(path.resolve()),
-            file_size=stat.st_size,
-            mtime_ns=stat.st_mtime_ns,
+            file_size=file_size,
+            mtime_ns=mtime_ns,
             sha256=sha256,
             distance="euclidean",
             base_count=int(train.shape[0]),
@@ -277,6 +335,345 @@ def inspect_dataset(path: Path) -> DatasetInfo:
             dimension=int(train.shape[1]),
             groundtruth_k=int(neighbors.shape[1]),
         )
+
+
+def require_parquet_fields(
+    pa: Any,
+    parquet_file: Any,
+    path: Path,
+    fields: dict[str, str],
+) -> None:
+    schema = parquet_file.schema_arrow
+    missing = set(fields).difference(schema.names)
+    if missing:
+        raise RuntimeError(f"{path.name} is missing columns: {sorted(missing)}")
+    for name, kind in fields.items():
+        data_type = schema.field(name).type
+        if kind == "integer" and not pa.types.is_integer(data_type):
+            raise RuntimeError(f"{path.name} column {name} must contain integers")
+        if kind == "float_list" and not (
+            (pa.types.is_list(data_type) or pa.types.is_large_list(data_type))
+            and pa.types.is_floating(data_type.value_type)
+        ):
+            raise RuntimeError(
+                f"{path.name} column {name} must contain lists of floats"
+            )
+        if kind == "integer_list" and not (
+            (pa.types.is_list(data_type) or pa.types.is_large_list(data_type))
+            and pa.types.is_integer(data_type.value_type)
+        ):
+            raise RuntimeError(
+                f"{path.name} column {name} must contain lists of integers"
+            )
+
+
+def first_parquet_list_width(parquet_file: Any, column: str, path: Path) -> int:
+    batch = next(
+        parquet_file.iter_batches(batch_size=1, columns=[column]),
+        None,
+    )
+    if batch is None or batch.num_rows == 0:
+        raise RuntimeError(f"{path.name} contains no rows")
+    value = batch.column(0)[0].as_py()
+    if value is None or not value:
+        raise RuntimeError(f"{path.name} column {column} contains an empty first row")
+    return len(value)
+
+
+def inspect_cohere_parquet_dataset(path: Path) -> DatasetInfo:
+    pa, pq = import_pyarrow()
+    train_path = path / COHERE_DATA_FILES[0]
+    test_path = path / COHERE_DATA_FILES[1]
+    neighbors_path = path / COHERE_DATA_FILES[2]
+    train = pq.ParquetFile(train_path)
+    test = pq.ParquetFile(test_path)
+    neighbors = pq.ParquetFile(neighbors_path)
+    require_parquet_fields(
+        pa,
+        train,
+        train_path,
+        {"id": "integer", "emb": "float_list"},
+    )
+    require_parquet_fields(
+        pa,
+        test,
+        test_path,
+        {"id": "integer", "emb": "float_list"},
+    )
+    require_parquet_fields(
+        pa,
+        neighbors,
+        neighbors_path,
+        {"id": "integer", "neighbors_id": "integer_list"},
+    )
+    base_count = int(train.metadata.num_rows)
+    query_count = int(test.metadata.num_rows)
+    if base_count == 0 or query_count == 0:
+        raise RuntimeError("Cohere train and test Parquet files must not be empty")
+    if neighbors.metadata.num_rows < query_count:
+        raise RuntimeError("neighbors.parquet contains fewer rows than test.parquet")
+    dimension = first_parquet_list_width(train, "emb", train_path)
+    test_dimension = first_parquet_list_width(test, "emb", test_path)
+    if test_dimension != dimension:
+        raise RuntimeError("Cohere train and test dimensions differ")
+    groundtruth_k = first_parquet_list_width(
+        neighbors,
+        "neighbors_id",
+        neighbors_path,
+    )
+    file_size, mtime_ns, sha256 = dataset_fingerprint(path)
+    return DatasetInfo(
+        path=str(path.resolve()),
+        file_size=file_size,
+        mtime_ns=mtime_ns,
+        sha256=sha256,
+        distance="cosine",
+        base_count=base_count,
+        query_count=query_count,
+        dimension=dimension,
+        groundtruth_k=groundtruth_k,
+        dataset_format=COHERE_PARQUET_FORMAT,
+    )
+
+
+def inspect_dataset_snapshot(
+    path: Path,
+) -> tuple[DatasetInfo, dict[str, tuple[int, int]]]:
+    initial_stats = dataset_file_stats(path)
+    if path.is_file():
+        info = inspect_hdf5_dataset(path)
+    elif path.is_dir():
+        info = inspect_cohere_parquet_dataset(path)
+    else:
+        raise RuntimeError(f"dataset path does not exist: {path}")
+    final_stats = dataset_file_stats(path)
+    if final_stats != initial_stats:
+        raise RuntimeError(f"dataset changed while it was being inspected: {path}")
+    return info, final_stats
+
+
+def inspect_dataset(path: Path) -> DatasetInfo:
+    return inspect_dataset_snapshot(path)[0]
+
+
+def arrow_list_matrix(
+    array: Any,
+    width: int,
+    dtype: Any,
+    description: str,
+) -> np.ndarray:
+    if array.null_count:
+        raise RuntimeError(f"{description} contains null lists")
+    offsets = np.asarray(array.offsets)
+    lengths = np.diff(offsets)
+    if np.any(lengths != width):
+        raise RuntimeError(f"{description} contains rows with an unexpected width")
+    value_offset = int(offsets[0])
+    value_count = int(offsets[-1] - offsets[0])
+    values = array.values.slice(value_offset, value_count).to_numpy(
+        zero_copy_only=False
+    )
+    return np.ascontiguousarray(values, dtype=dtype).reshape(len(array), width)
+
+
+class DatasetReader:
+    def __init__(
+        self,
+        path: Path,
+        info: DatasetInfo,
+        expected_stats: dict[str, tuple[int, int]] | None = None,
+    ) -> None:
+        self.path = path
+        self.info = info
+        self.initial_stats = dataset_file_stats(path)
+        if expected_stats is not None and self.initial_stats != expected_stats:
+            raise RuntimeError(f"dataset changed after it was inspected: {self.path}")
+
+    def verify_unchanged(self) -> None:
+        if dataset_file_stats(self.path) != self.initial_stats:
+            raise RuntimeError(f"dataset changed while it was being read: {self.path}")
+
+
+class Hdf5DatasetReader(DatasetReader):
+    def __init__(
+        self,
+        path: Path,
+        info: DatasetInfo,
+        expected_stats: dict[str, tuple[int, int]] | None = None,
+    ) -> None:
+        super().__init__(path, info, expected_stats)
+        self.h5py = import_h5py()
+
+    def iter_train_batches(
+        self,
+        count: int,
+        batch_size: int,
+    ) -> Iterable[tuple[np.ndarray, np.ndarray]]:
+        with self.h5py.File(self.path, "r") as source:
+            for start, stop in iter_slices(count, batch_size):
+                yield (
+                    np.arange(start, stop, dtype=np.int64),
+                    dataset_slice(source["train"], start, stop),
+                )
+
+    def load_train_ids(self, count: int) -> np.ndarray:
+        return np.arange(count, dtype=np.int64)
+
+    def load_queries(self, count: int) -> tuple[np.ndarray, np.ndarray]:
+        with self.h5py.File(self.path, "r") as source:
+            return (
+                np.arange(count, dtype=np.int64),
+                dataset_slice(source["test"], 0, count),
+            )
+
+    def load_neighbors(
+        self,
+        count: int,
+        topk: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        with self.h5py.File(self.path, "r") as source:
+            return (
+                np.arange(count, dtype=np.int64),
+                np.ascontiguousarray(
+                    source["neighbors"][:count, :topk],
+                    dtype=np.int64,
+                ),
+            )
+
+
+class CohereParquetDatasetReader(DatasetReader):
+    def __init__(
+        self,
+        path: Path,
+        info: DatasetInfo,
+        expected_stats: dict[str, tuple[int, int]] | None = None,
+    ) -> None:
+        super().__init__(path, info, expected_stats)
+        _pa, self.pq = import_pyarrow()
+
+    def iter_vector_batches(
+        self,
+        file_name: str,
+        count: int,
+        batch_size: int,
+    ) -> Iterable[tuple[np.ndarray, np.ndarray]]:
+        parquet_file = self.pq.ParquetFile(self.path / file_name)
+        emitted = 0
+        for batch in parquet_file.iter_batches(
+            batch_size=batch_size,
+            columns=["id", "emb"],
+        ):
+            if emitted >= count:
+                break
+            selected_batch = batch.slice(0, count - emitted)
+            ids = np.ascontiguousarray(
+                selected_batch.column(0).to_numpy(zero_copy_only=False),
+                dtype=np.int64,
+            )
+            vectors = arrow_list_matrix(
+                selected_batch.column(1),
+                self.info.dimension,
+                np.float32,
+                f"{file_name} emb",
+            )
+            emitted += selected_batch.num_rows
+            yield ids, vectors
+        if emitted != count:
+            raise RuntimeError(f"{file_name} returned {emitted} rows, expected {count}")
+
+    def iter_train_batches(
+        self,
+        count: int,
+        batch_size: int,
+    ) -> Iterable[tuple[np.ndarray, np.ndarray]]:
+        return self.iter_vector_batches(
+            "shuffle_train.parquet",
+            count,
+            batch_size,
+        )
+
+    def load_train_ids(self, count: int) -> np.ndarray:
+        parquet_file = self.pq.ParquetFile(self.path / "shuffle_train.parquet")
+        parts: list[np.ndarray] = []
+        emitted = 0
+        for batch in parquet_file.iter_batches(batch_size=65536, columns=["id"]):
+            if emitted >= count:
+                break
+            selected_batch = batch.slice(0, count - emitted)
+            parts.append(
+                np.ascontiguousarray(
+                    selected_batch.column(0).to_numpy(zero_copy_only=False),
+                    dtype=np.int64,
+                )
+            )
+            emitted += selected_batch.num_rows
+        if emitted != count:
+            raise RuntimeError(
+                f"shuffle_train.parquet returned {emitted} IDs, expected {count}"
+            )
+        return np.concatenate(parts)
+
+    def load_queries(self, count: int) -> tuple[np.ndarray, np.ndarray]:
+        batches = list(
+            self.iter_vector_batches(
+                "test.parquet",
+                count,
+                batch_size=min(count, 4096),
+            )
+        )
+        return (
+            np.concatenate([ids for ids, _vectors in batches]),
+            np.concatenate([vectors for _ids, vectors in batches]),
+        )
+
+    def load_neighbors(
+        self,
+        count: int,
+        topk: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        parquet_file = self.pq.ParquetFile(self.path / "neighbors.parquet")
+        id_parts: list[np.ndarray] = []
+        neighbor_parts: list[np.ndarray] = []
+        emitted = 0
+        for batch in parquet_file.iter_batches(
+            batch_size=min(count, 4096),
+            columns=["id", "neighbors_id"],
+        ):
+            if emitted >= count:
+                break
+            selected_batch = batch.slice(0, count - emitted)
+            id_parts.append(
+                np.ascontiguousarray(
+                    selected_batch.column(0).to_numpy(zero_copy_only=False),
+                    dtype=np.int64,
+                )
+            )
+            neighbor_parts.append(
+                arrow_list_matrix(
+                    selected_batch.column(1),
+                    self.info.groundtruth_k,
+                    np.int64,
+                    "neighbors.parquet neighbors_id",
+                )[:, :topk]
+            )
+            emitted += selected_batch.num_rows
+        if emitted != count:
+            raise RuntimeError(
+                f"neighbors.parquet returned {emitted} rows, expected {count}"
+            )
+        return np.concatenate(id_parts), np.concatenate(neighbor_parts)
+
+
+def open_dataset(
+    path: Path,
+    info: DatasetInfo,
+    expected_stats: dict[str, tuple[int, int]] | None = None,
+) -> Any:
+    if info.dataset_format == ANN_BENCHMARKS_FORMAT:
+        return Hdf5DatasetReader(path, info, expected_stats)
+    if info.dataset_format == COHERE_PARQUET_FORMAT:
+        return CohereParquetDatasetReader(path, info, expected_stats)
+    raise RuntimeError(f"unsupported dataset format: {info.dataset_format!r}")
 
 
 def selected_dataset_info(
@@ -292,6 +689,7 @@ def selected_dataset_info(
         query_count=min_nonzero(max_queries, dataset_info.query_count),
         dimension=dataset_info.dimension,
         groundtruth_k=dataset_info.groundtruth_k,
+        dataset_format=dataset_info.dataset_format,
     )
 
 
@@ -321,16 +719,21 @@ def validate_search_args(info: DatasetInfo, args: argparse.Namespace) -> None:
             )
 
 
-def validate_ground_truth(ground_truth: np.ndarray, base_count: int, topk: int) -> None:
+def validate_ground_truth(
+    ground_truth: np.ndarray,
+    base_ids: np.ndarray,
+    topk: int,
+) -> None:
     selected = ground_truth[:, :topk]
     if selected.size == 0:
         raise RuntimeError("ground truth is empty")
-    minimum = int(np.min(selected))
-    maximum = int(np.max(selected))
-    if minimum < 0 or maximum >= base_count:
+    if np.unique(base_ids).size != base_ids.size:
+        raise RuntimeError("selected base contains duplicate IDs")
+    missing = np.setdiff1d(selected, base_ids)
+    if missing.size:
         raise RuntimeError(
-            f"ground truth IDs [{minimum}, {maximum}] do not fit selected "
-            f"base count {base_count}; use the complete base set"
+            f"ground truth contains IDs outside the selected base: "
+            f"{missing[:10].tolist()}"
         )
 
 
@@ -355,18 +758,41 @@ def exact_ground_truth(
     base_count: int,
     topk: int,
     block_size: int = 10000,
+    distance: str = "euclidean",
 ) -> np.ndarray:
-    """Compute exact squared-L2 neighbors for a truncated smoke-test base."""
+    """Compute exact neighbors for a truncated smoke-test base."""
     best_distances = np.full((queries.shape[0], topk), np.inf, dtype=np.float32)
     best_labels = np.full((queries.shape[0], topk), -1, dtype=np.int64)
-    query_norms = np.sum(queries * queries, axis=1, keepdims=True)
-    for start, stop in iter_slices(base_count, block_size):
-        base = dataset_slice(train, start, stop)
-        base_norms = np.sum(base * base, axis=1)
-        distances = query_norms + base_norms - 2.0 * queries @ base.T
-        labels = np.broadcast_to(
-            np.arange(start, stop, dtype=np.int64), distances.shape
+    if distance == "euclidean":
+        query_norms = np.sum(queries * queries, axis=1, keepdims=True)
+    elif distance == "cosine":
+        query_lengths = np.linalg.norm(queries, axis=1, keepdims=True)
+        if np.any(query_lengths == 0):
+            raise RuntimeError("cosine queries must not contain zero vectors")
+        normalized_queries = queries / query_lengths
+    else:
+        raise RuntimeError(f"unsupported distance: {distance!r}")
+
+    if hasattr(train, "iter_train_batches"):
+        batches = train.iter_train_batches(base_count, block_size)
+    else:
+        batches = (
+            (
+                np.arange(start, stop, dtype=np.int64),
+                dataset_slice(train, start, stop),
+            )
+            for start, stop in iter_slices(base_count, block_size)
         )
+    for ids, base in batches:
+        if distance == "euclidean":
+            base_norms = np.sum(base * base, axis=1)
+            distances = query_norms + base_norms - 2.0 * queries @ base.T
+        else:
+            base_lengths = np.linalg.norm(base, axis=1, keepdims=True)
+            if np.any(base_lengths == 0):
+                raise RuntimeError("cosine base vectors must not contain zero vectors")
+            distances = 1.0 - normalized_queries @ (base / base_lengths).T
+        labels = np.broadcast_to(ids, distances.shape)
         candidate_distances = np.concatenate((best_distances, distances), axis=1)
         candidate_labels = np.concatenate((best_labels, labels), axis=1)
         selected = np.argpartition(candidate_distances, topk - 1, axis=1)[:, :topk]
@@ -405,12 +831,14 @@ def dataset_mismatches(
     allow_relocation: bool,
 ) -> list[str]:
     ignored = {"path", "mtime_ns"} if allow_relocation else set()
+    saved_values = dict(saved)
+    saved_values.setdefault("dataset_format", ANN_BENCHMARKS_FORMAT)
     mismatches = [
-        f"{key}: saved={saved.get(key)!r}, requested={value!r}"
+        f"{key}: saved={saved_values.get(key)!r}, requested={value!r}"
         for key, value in asdict(info).items()
         if key not in ignored
-        and not (key == "sha256" and saved.get(key) is None)
-        and saved.get(key) != value
+        and not (key == "sha256" and saved_values.get(key) is None)
+        and saved_values.get(key) != value
     ]
     if allow_relocation and saved.get("sha256") is None:
         mismatches.append(
@@ -518,6 +946,30 @@ def ensure_statuses_ok(statuses: Sequence[Any], operation: str) -> None:
             raise RuntimeError(f"{operation} failed at batch offset {offset}: {status}")
 
 
+def zvec_metric_type(zvec: Any, distance: str) -> Any:
+    if distance == "euclidean":
+        return zvec.MetricType.L2
+    if distance == "cosine":
+        return zvec.MetricType.COSINE
+    raise RuntimeError(f"unsupported distance: {distance!r}")
+
+
+def zvec_metric_name(distance: str) -> str:
+    if distance == "euclidean":
+        return "L2"
+    if distance == "cosine":
+        return "COSINE"
+    raise RuntimeError(f"unsupported distance: {distance!r}")
+
+
+def es_similarity(distance: str) -> str:
+    if distance == "euclidean":
+        return "l2_norm"
+    if distance == "cosine":
+        return "cosine"
+    raise RuntimeError(f"unsupported distance: {distance!r}")
+
+
 def build_zvec(
     source: Any,
     work_dir: Path,
@@ -529,14 +981,14 @@ def build_zvec(
     remove_existing_zvec(path, args.overwrite, zvec)
     started = time.perf_counter()
     schema = zvec.CollectionSchema(
-        name="gist_hnsw_rabitq",
+        name="hnsw_rabitq_benchmark",
         vectors=[
             zvec.VectorSchema(
                 VECTOR_FIELD,
                 zvec.DataType.VECTOR_FP32,
                 dimension=info.dimension,
                 index_param=zvec.HnswRabitqIndexParam(
-                    metric_type=zvec.MetricType.L2,
+                    metric_type=zvec_metric_type(zvec, info.distance),
                     total_bits=args.zvec_total_bits,
                     num_clusters=args.zvec_num_clusters,
                     sample_count=args.zvec_sample_count,
@@ -557,14 +1009,21 @@ def build_zvec(
     )
 
     ingest_started = time.perf_counter()
-    for start, stop in iter_slices(info.base_count, args.zvec_batch_size):
-        vectors = dataset_slice(source["train"], start, stop)
+    inserted = 0
+    for ids, vectors in source.iter_train_batches(
+        info.base_count,
+        args.zvec_batch_size,
+    ):
         docs = [
             zvec.Doc(id=str(doc_id), vectors={VECTOR_FIELD: vector})
-            for doc_id, vector in zip(range(start, stop), vectors, strict=False)
+            for doc_id, vector in zip(ids, vectors, strict=False)
         ]
-        ensure_statuses_ok(collection.insert(docs), f"Zvec insert [{start}:{stop})")
-        print(f"\rZvec insert: {stop}/{info.base_count}", end="", flush=True)
+        ensure_statuses_ok(
+            collection.insert(docs),
+            f"Zvec insert batch starting at {inserted}",
+        )
+        inserted += len(docs)
+        print(f"\rZvec insert: {inserted}/{info.base_count}", end="", flush=True)
     print()
     ingest_seconds = time.perf_counter() - ingest_started
 
@@ -587,7 +1046,7 @@ def build_zvec(
         details={
             "path": str(path),
             "index_type": "HNSW_RABITQ",
-            "metric": "L2",
+            "metric": zvec_metric_name(info.distance),
             "m": args.m,
             "ef_construction": args.ef_construction,
             "total_bits": args.zvec_total_bits,
@@ -647,7 +1106,7 @@ def es_index_definition(info: DatasetInfo, args: argparse.Namespace) -> dict[str
                     "element_type": "float",
                     "dims": info.dimension,
                     "index": True,
-                    "similarity": "l2_norm",
+                    "similarity": es_similarity(info.distance),
                     "index_options": {
                         "type": "bbq_hnsw",
                         "m": args.m,
@@ -660,21 +1119,26 @@ def es_index_definition(info: DatasetInfo, args: argparse.Namespace) -> dict[str
 
 
 def es_actions(
-    train: Any,
+    source: Any,
     index_name: str,
     base_count: int,
     batch_rows: int,
 ) -> Iterable[dict[str, Any]]:
-    for start, stop in iter_slices(base_count, batch_rows):
-        vectors = dataset_slice(train, start, stop)
-        for doc_id, vector in zip(range(start, stop), vectors, strict=False):
+    submitted = 0
+    for ids, vectors in source.iter_train_batches(base_count, batch_rows):
+        for doc_id, vector in zip(ids, vectors, strict=False):
             yield {
                 "_op_type": "index",
                 "_index": index_name,
                 "_id": str(doc_id),
                 "_source": {VECTOR_FIELD: vector.tolist()},
             }
-        print(f"\rElasticsearch submit: {stop}/{base_count}", end="", flush=True)
+        submitted += len(ids)
+        print(
+            f"\rElasticsearch submit: {submitted}/{base_count}",
+            end="",
+            flush=True,
+        )
 
 
 def es_primary_stats(client: Any, index_name: str) -> tuple[int, int, int]:
@@ -738,7 +1202,10 @@ def validate_es_index(
     expected = {
         "type": (field.get("type"), "dense_vector"),
         "dims": (field.get("dims"), info.dimension),
-        "similarity": (field.get("similarity"), "l2_norm"),
+        "similarity": (
+            field.get("similarity"),
+            es_similarity(info.distance),
+        ),
         "index_options.type": (index_options.get("type"), "bbq_hnsw"),
         "index_options.m": (index_options.get("m"), args.m),
         "index_options.ef_construction": (
@@ -786,7 +1253,7 @@ def build_elasticsearch(
     for ok, item in helpers.parallel_bulk(
         client.options(request_timeout=args.es_request_timeout),
         es_actions(
-            source["train"],
+            source,
             args.es_index,
             info.base_count,
             args.es_source_batch_rows,
@@ -845,7 +1312,7 @@ def build_elasticsearch(
             "index": args.es_index,
             "version": version,
             "index_type": "bbq_hnsw",
-            "metric": "l2_norm",
+            "metric": es_similarity(info.distance),
             "m": args.m,
             "ef_construction": args.ef_construction,
             "shards": 1,
@@ -1059,7 +1526,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset",
         required=True,
         type=Path,
-        help="ANN-Benchmarks HDF5 file with train/test/neighbors datasets.",
+        help=(
+            "ANN-Benchmarks HDF5 file or Cohere Parquet directory containing "
+            "shuffle_train.parquet, test.parquet, and neighbors.parquet."
+        ),
     )
     parser.add_argument(
         "--work-dir",
@@ -1208,27 +1678,27 @@ def run_build_phase(
     info: DatasetInfo,
     engines: Sequence[str],
     clients: EngineClients,
-    h5py: Any,
+    source: Any,
 ) -> None:
     manifest = load_manifest(args.work_dir)
     validate_retained_builds(manifest, info, args, engines)
     build_results: list[BuildResult] = []
-    with h5py.File(args.dataset, "r") as source:
-        if "zvec" in engines:
-            build_results.append(
-                build_zvec(source, args.work_dir, info, args, clients.zvec)
+    if "zvec" in engines:
+        build_results.append(
+            build_zvec(source, args.work_dir, info, args, clients.zvec)
+        )
+    if "elasticsearch" in engines:
+        build_results.append(
+            build_elasticsearch(
+                source,
+                info,
+                args,
+                clients.elasticsearch,
+                clients.elasticsearch_helpers,
+                clients.elasticsearch_version,
             )
-        if "elasticsearch" in engines:
-            build_results.append(
-                build_elasticsearch(
-                    source,
-                    info,
-                    args,
-                    clients.elasticsearch,
-                    clients.elasticsearch_helpers,
-                    clients.elasticsearch_version,
-                )
-            )
+        )
+    source.verify_unchanged()
     manifest["dataset"] = asdict(info)
     manifest_config = manifest.setdefault("config", {})
     manifest_config.update(
@@ -1262,23 +1732,27 @@ def load_search_data(
     args: argparse.Namespace,
     info: DatasetInfo,
     full_info: DatasetInfo,
-    h5py: Any,
+    source: Any,
 ) -> tuple[np.ndarray, np.ndarray]:
-    with h5py.File(args.dataset, "r") as source:
-        queries = dataset_slice(source["test"], 0, info.query_count)
-        if info.base_count == full_info.base_count:
-            ground_truth = np.ascontiguousarray(
-                source["neighbors"][: info.query_count, : args.topk],
-                dtype=np.int64,
-            )
-        else:
-            ground_truth = exact_ground_truth(
-                source["train"],
-                queries,
-                info.base_count,
-                args.topk,
-            )
-    validate_ground_truth(ground_truth, info.base_count, args.topk)
+    query_ids, queries = source.load_queries(info.query_count)
+    if info.base_count == full_info.base_count:
+        neighbor_query_ids, ground_truth = source.load_neighbors(
+            info.query_count,
+            args.topk,
+        )
+        if not np.array_equal(query_ids, neighbor_query_ids):
+            raise RuntimeError("test and ground-truth query IDs differ")
+    else:
+        ground_truth = exact_ground_truth(
+            source,
+            queries,
+            info.base_count,
+            args.topk,
+            distance=info.distance,
+        )
+    base_ids = source.load_train_ids(info.base_count)
+    source.verify_unchanged()
+    validate_ground_truth(ground_truth, base_ids, args.topk)
     return queries, ground_truth
 
 
@@ -1288,14 +1762,14 @@ def run_search_phase(
     full_info: DatasetInfo,
     engines: Sequence[str],
     clients: EngineClients,
-    h5py: Any,
+    source: Any,
 ) -> None:
     manifest = load_manifest(args.work_dir)
     validate_manifest(manifest, info, args)
     missing = [engine for engine in engines if engine not in manifest.get("build", {})]
     if missing:
         raise RuntimeError(f"manifest has no build record for engines: {missing}")
-    queries, ground_truth = load_search_data(args, info, full_info, h5py)
+    queries, ground_truth = load_search_data(args, info, full_info, source)
 
     if "zvec" in engines:
         collection = clients.zvec.open(
@@ -1349,7 +1823,7 @@ def run_search_phase(
 
 def main() -> int:
     args = build_parser().parse_args()
-    full_info = inspect_dataset(args.dataset)
+    full_info, inspected_stats = inspect_dataset_snapshot(args.dataset)
     info = selected_dataset_info(full_info, args.max_base, args.max_queries)
     print_dataset_info(info)
     if args.mode == "inspect":
@@ -1357,13 +1831,13 @@ def main() -> int:
 
     validate_search_args(info, args)
     args.work_dir.mkdir(parents=True, exist_ok=True)
-    h5py = import_h5py()
+    source = open_dataset(args.dataset, full_info, inspected_stats)
     engines = selected_engines(args.engines)
     clients = initialize_engines(args, engines)
     if args.mode in ("build", "all"):
-        run_build_phase(args, info, engines, clients, h5py)
+        run_build_phase(args, info, engines, clients, source)
     if args.mode in ("search", "all"):
-        run_search_phase(args, info, full_info, engines, clients, h5py)
+        run_search_phase(args, info, full_info, engines, clients, source)
     return 0
 
 
