@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from argparse import Namespace
@@ -24,6 +25,8 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 SCRIPT_PATH = Path(__file__).with_name("benchmark.py")
@@ -59,6 +62,52 @@ def write_dataset(path: Path) -> None:
         )
 
 
+def write_cohere_dataset(path: Path) -> None:
+    path.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([30, 10, 20, 40], type=pa.int64()),
+                "emb": pa.array(
+                    [
+                        [100.0, 10.0],
+                        [1.0, 1.0],
+                        [0.0, 2.0],
+                        [-1.0, 0.0],
+                    ],
+                    type=pa.large_list(pa.float32()),
+                ),
+            }
+        ),
+        path / "shuffle_train.parquet",
+        row_group_size=2,
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([0, 1], type=pa.int64()),
+                "emb": pa.array(
+                    [[1.0, 0.0], [0.0, 1.0]],
+                    type=pa.large_list(pa.float32()),
+                ),
+            }
+        ),
+        path / "test.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([0, 1], type=pa.int64()),
+                "neighbors_id": pa.array(
+                    [[30, 10, 20], [20, 10, 30]],
+                    type=pa.large_list(pa.int64()),
+                ),
+            }
+        ),
+        path / "neighbors.parquet",
+    )
+
+
 def test_inspect_dataset(tmp_path: Path) -> None:
     path = tmp_path / "tiny.hdf5"
     write_dataset(path)
@@ -70,6 +119,115 @@ def test_inspect_dataset(tmp_path: Path) -> None:
     assert info.dimension == 4
     assert info.groundtruth_k == 5
     assert info.distance == "euclidean"
+
+
+def test_inspect_cohere_parquet_dataset(tmp_path: Path) -> None:
+    path = tmp_path / "cohere_medium_1m"
+    write_cohere_dataset(path)
+
+    info = benchmark.inspect_dataset(path)
+
+    assert info.base_count == 4
+    assert info.query_count == 2
+    assert info.dimension == 2
+    assert info.groundtruth_k == 3
+    assert info.distance == "cosine"
+    assert info.dataset_format == "cohere-parquet"
+
+
+def test_cohere_reader_preserves_ids_and_computes_cosine_ground_truth(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cohere_medium_1m"
+    write_cohere_dataset(path)
+    info = benchmark.inspect_dataset(path)
+    source = benchmark.open_dataset(path, info)
+
+    batches = list(source.iter_train_batches(info.base_count, batch_size=2))
+    train_ids = np.concatenate([ids for ids, _vectors in batches])
+    queries = source.load_queries(info.query_count)[1]
+    labels = benchmark.exact_ground_truth(
+        source,
+        queries,
+        info.base_count,
+        topk=2,
+        distance=info.distance,
+        block_size=2,
+    )
+
+    np.testing.assert_array_equal(train_ids, [30, 10, 20, 40])
+    np.testing.assert_array_equal(labels, [[30, 10], [20, 10]])
+
+
+def test_cohere_search_data_uses_parquet_ground_truth_ids(tmp_path: Path) -> None:
+    path = tmp_path / "cohere_medium_1m"
+    write_cohere_dataset(path)
+    info = benchmark.inspect_dataset(path)
+    source = benchmark.open_dataset(path, info)
+
+    queries, ground_truth = benchmark.load_search_data(
+        Namespace(topk=2),
+        info,
+        info,
+        source,
+    )
+
+    np.testing.assert_array_equal(queries, [[1.0, 0.0], [0.0, 1.0]])
+    np.testing.assert_array_equal(ground_truth, [[30, 10], [20, 10]])
+
+
+def test_cohere_fingerprint_survives_directory_relocation(tmp_path: Path) -> None:
+    original = tmp_path / "machine-a" / "cohere_medium_1m"
+    original.parent.mkdir()
+    write_cohere_dataset(original)
+    relocated = tmp_path / "machine-b" / "datasets" / "cohere_medium_1m"
+    relocated.parent.mkdir(parents=True)
+    shutil.copytree(original, relocated)
+    relocated_train = relocated / "shuffle_train.parquet"
+    stat = relocated_train.stat()
+    os.utime(
+        relocated_train,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    original_info = benchmark.inspect_dataset(original)
+    relocated_info = benchmark.inspect_dataset(relocated)
+
+    assert relocated_info.path != original_info.path
+    assert relocated_info.mtime_ns != original_info.mtime_ns
+    assert relocated_info.file_size == original_info.file_size
+    assert relocated_info.sha256 == original_info.sha256
+
+
+def test_cohere_reader_detects_dataset_change_after_open(tmp_path: Path) -> None:
+    path = tmp_path / "cohere_medium_1m"
+    write_cohere_dataset(path)
+    info = benchmark.inspect_dataset(path)
+    source = benchmark.open_dataset(path, info)
+    train_path = path / "shuffle_train.parquet"
+    stat = train_path.stat()
+    os.utime(
+        train_path,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    with pytest.raises(RuntimeError, match="changed while it was being read"):
+        source.verify_unchanged()
+
+
+def test_cohere_reader_rejects_change_after_inspection(tmp_path: Path) -> None:
+    path = tmp_path / "cohere_medium_1m"
+    write_cohere_dataset(path)
+    info, inspected_stats = benchmark.inspect_dataset_snapshot(path)
+    train_path = path / "shuffle_train.parquet"
+    stat = train_path.stat()
+    os.utime(
+        train_path,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    with pytest.raises(RuntimeError, match="changed after it was inspected"):
+        benchmark.open_dataset(path, info, inspected_stats)
 
 
 def test_inspect_dataset_rejects_non_l2(tmp_path: Path) -> None:
@@ -147,6 +305,57 @@ def test_es_index_definition_aligns_hnsw_parameters() -> None:
     }
 
 
+def test_es_index_definition_uses_cosine_for_cohere() -> None:
+    info = benchmark.DatasetInfo(
+        path="/data/cohere_medium_1m",
+        file_size=1,
+        mtime_ns=2,
+        sha256="dataset-sha256",
+        distance="cosine",
+        base_count=1_000_000,
+        query_count=1000,
+        dimension=768,
+        groundtruth_k=1000,
+        dataset_format="cohere-parquet",
+    )
+    args = Namespace(m=16, ef_construction=100)
+
+    definition = benchmark.es_index_definition(info, args)
+    field = definition["mappings"]["properties"][benchmark.VECTOR_FIELD]
+
+    assert field["dims"] == 768
+    assert field["similarity"] == "cosine"
+
+
+def test_es_actions_use_cohere_parquet_document_ids(tmp_path: Path) -> None:
+    path = tmp_path / "cohere_medium_1m"
+    write_cohere_dataset(path)
+    info = benchmark.inspect_dataset(path)
+    source = benchmark.open_dataset(path, info)
+
+    actions = list(
+        benchmark.es_actions(
+            source,
+            "cohere-bbq",
+            info.base_count,
+            batch_rows=2,
+        )
+    )
+
+    assert [action["_id"] for action in actions] == ["30", "10", "20", "40"]
+    assert all(action["_index"] == "cohere-bbq" for action in actions)
+
+
+def test_zvec_metric_type_uses_cosine_for_cohere() -> None:
+    class MetricType:
+        L2 = object()
+        COSINE = object()
+
+    fake_zvec = Namespace(MetricType=MetricType)
+
+    assert benchmark.zvec_metric_type(fake_zvec, "cosine") is MetricType.COSINE
+
+
 def test_wait_for_stable_es_primary_stats_ignores_transient_store_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,6 +417,7 @@ def test_portable_runner_help_documents_machine_specific_paths() -> None:
     assert "--work-dir PATH" in result.stdout
     assert "--cpus LIST" in result.stdout
     assert "ZVEC_BENCH_DATASET" in result.stdout
+    assert "Cohere Parquet directory" in result.stdout
 
 
 def test_portable_runner_requires_dataset_and_work_dir() -> None:
@@ -272,6 +482,33 @@ def test_portable_runner_dry_run_uses_explicit_machine_configuration(
     assert "port=29200" in result.stdout
     assert "cpus=2\\,4" in result.stdout
     assert "docker stop" in result.stdout
+
+
+def test_portable_runner_accepts_directory_dataset(tmp_path: Path) -> None:
+    dataset = tmp_path / "cohere_medium_1m"
+    dataset.mkdir()
+    work_dir = tmp_path / "results"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUN_SCRIPT_PATH),
+            "inspect",
+            "--dataset",
+            str(dataset),
+            "--work-dir",
+            str(work_dir),
+            "--cpus",
+            "none",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(dataset) in result.stdout
 
 
 def test_portable_runner_overwrite_resets_previous_search_results(
@@ -392,3 +629,37 @@ def test_manifest_allows_explicit_dataset_relocation() -> None:
     manifest["dataset"]["sha256"] = "different-content"
     with pytest.raises(RuntimeError, match="sha256:"):
         benchmark.validate_manifest(manifest, relocated_info, args)
+
+
+def test_legacy_gist_manifest_defaults_to_hdf5_format() -> None:
+    info = benchmark.DatasetInfo(
+        path="/data/gist.hdf5",
+        file_size=3_844_648_288,
+        mtime_ns=100,
+        sha256="same-content",
+        distance="euclidean",
+        base_count=1_000_000,
+        query_count=1000,
+        dimension=960,
+        groundtruth_k=100,
+    )
+    saved_dataset = asdict(info)
+    saved_dataset.pop("dataset_format")
+    manifest = {
+        "dataset": saved_dataset,
+        "config": {"m": 16, "ef_construction": 100},
+        "build": {
+            "elasticsearch": {
+                "details": {"index": "gist-bbq"},
+            }
+        },
+    }
+    args = Namespace(
+        engines="elasticsearch",
+        m=16,
+        ef_construction=100,
+        es_index="gist-bbq",
+        allow_dataset_relocation=False,
+    )
+
+    benchmark.validate_manifest(manifest, info, args)

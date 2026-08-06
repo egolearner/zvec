@@ -1,16 +1,16 @@
 # Zvec HNSW-RaBitQ vs Elasticsearch BBQ-HNSW
 
-本目录提供一套可复现的端到端 benchmark，第一阶段支持
-`gist-960-euclidean.hdf5`：
+本目录提供一套可复现的端到端 benchmark，支持以下两种 1M 数据集：
 
-| HDF5 key | shape | 用途 |
-|---|---:|---|
-| `train` | `1,000,000 × 960` FP32 | 建库 |
-| `test` | `1,000 × 960` FP32 | 查询 |
-| `neighbors` | `1,000 × 100` INT32 | L2 ground truth |
-| `distances` | `1,000 × 100` FP32 | ground-truth 距离，本脚本暂不使用 |
+| 数据集 | base / query | 维度 | 距离 | ground truth |
+|---|---:|---:|---|---|
+| GIST `gist-960-euclidean.hdf5` | 1,000,000 / 1,000 | 960 | Euclidean | HDF5 `neighbors`，宽度 100 |
+| Cohere `cohere_medium_1m/` | 1,000,000 / 1,000 | 768 | cosine | `neighbors.parquet`，宽度 1,000 |
 
-脚本直接分批读取 HDF5，不会一次性把 3.8 GB base vectors 全部载入内存。
+GIST 使用 ANN-Benchmarks HDF5 的 `train/test/neighbors`。Cohere 目录必须包含
+`shuffle_train.parquet`、`test.parquet` 和 `neighbors.parquet`；训练行中的真实
+`id` 会原样写入两个引擎，并用于计算 Recall。脚本分批读取 base vectors，不会
+一次性把约 3 GB 数据全部载入内存。
 
 ## 快速开始：可迁移的一键入口
 
@@ -28,6 +28,17 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
   --overwrite
 ```
 
+运行 Cohere 1M 时只需把数据参数改为目录，并使用独立结果目录和 ES index：
+
+```bash
+export ZVEC_BENCH_DATASET=/path/to/cohere_medium_1m
+export ZVEC_BENCH_WORK_DIR=/path/to/benchmark-results/cohere-one-bit
+export ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
+
+bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh smoke --overwrite
+bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all --overwrite
+```
+
 一键入口默认运行 Zvec `total_bits=1` 对 ES BBQ 无 `rescore_vector` 的纯 1-bit
 实验。完整的新机器准备、CPU 选择、Docker、远端 ES 和数据换路径说明见
 [`RUN_ON_ANOTHER_MACHINE.md`](RUN_ON_ANOTHER_MACHINE.md)。
@@ -39,7 +50,7 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
 | 项 | Zvec | Elasticsearch 8.18+ |
 |---|---|---|
 | 索引 | `HNSW_RABITQ` | `bbq_hnsw` |
-| 距离 | L2 | `l2_norm` |
+| 距离 | GIST: `L2`；Cohere: `COSINE` | GIST: `l2_norm`；Cohere: `cosine` |
 | HNSW 参数 | `M=16`, `ef_construction=100` | `m=16`, `ef_construction=100` |
 | 量化/精排 | `total_bits=1`，不访问 raw vector 精排 | 1-bit BBQ，不传 `rescore_vector` |
 | 数据布局 | 完整 Zvec collection | 1 primary shard、0 replica、禁用 `_source` |
@@ -95,8 +106,8 @@ export PYTHONPATH="$PWD/python:$PWD/build.release/lib"
 
 Elasticsearch 必须是 8.18.0 或更新版本。建议先固定 8.18 的具体 patch
 版本完成基准，再单独测更新版本，不要把不同 Lucene/OSQ 实现混在同一张图里。
-GIST-1M 是 3.8 GB FP32 数据，建议单节点至少分配 16 个物理核和 32–64 GB
-内存，并确保 page cache 能容纳待检索文件。
+GIST-1M 和 Cohere-1M 都约为 3–4 GB FP32 数据，建议单节点至少分配 16 个
+物理核和 32–64 GB 内存，并确保 page cache 能容纳待检索文件。
 
 ## 3. 启动 Elasticsearch Docker
 
@@ -148,6 +159,8 @@ curl --fail --silent --show-error \
 
 ## 4. 数据检查
 
+GIST：
+
 ```bash
 export ZVEC_BENCH_DATASET=/path/to/gist-960-euclidean.hdf5
 export ZVEC_BENCH_WORK_DIR=/path/to/benchmark-results/gist-hnsw
@@ -172,10 +185,26 @@ python \
 }
 ```
 
-如果将同一份 HDF5 和已构建结果复制到另一台机器，绝对路径和 mtime 会变化。
+Cohere：
+
+```bash
+export ZVEC_BENCH_DATASET=/path/to/cohere_medium_1m
+export ZVEC_BENCH_WORK_DIR=/path/to/benchmark-results/cohere-hnsw
+
+python tools/benchmark/hnsw_rabitq_vs_es/benchmark.py \
+  --dataset "$ZVEC_BENCH_DATASET" \
+  --mode inspect
+```
+
+预期关键信息为 `base_count=1000000`、`query_count=1000`、
+`dimension=768`、`groundtruth_k=1000`、`distance=cosine` 和
+`dataset_format=cohere-parquet`。
+
+如果将同一份数据和已构建结果复制到另一台机器，绝对路径和 mtime 会变化。
 search/build-retained-index 时可显式传 `--allow-dataset-relocation`，忽略这两项，
-同时继续校验完整文件 SHA-256、文件大小和 ANN 元数据。旧 manifest 没有
-`sha256` 时不能跨路径复用，需要重新构建一次。
+同时继续校验完整数据 SHA-256、大小和 ANN 元数据。Cohere 的 SHA-256 按固定
+文件名和三个参与实验的 Parquet 文件内容共同计算。旧 manifest 没有 `sha256`
+时不能跨路径复用，需要重新构建一次。
 
 ## 5. 构建
 
@@ -215,7 +244,7 @@ taskset -c "$BENCH_CPUS" /usr/bin/time -v python \
 
 构建输出拆成：
 
-- `ingest_seconds`：HDF5 解码、客户端对象/JSON 生成、写入和增量建图；
+- `ingest_seconds`：HDF5/Parquet 解码、客户端对象/JSON 生成、写入和增量建图；
 - `finalize_seconds`：Zvec `optimize + flush` 或 ES
   `refresh + force_merge`；
 - `total_seconds`、端到端 vectors/s、最终存储字节数。
@@ -268,7 +297,8 @@ SMT、NUMA、内核、编译 SIMD、JVM heap、ES patch 版本和 Zvec commit。
 ## 7. Smoke test
 
 可先用前 10,000 条 base 和 100 条 query 验证全流程。脚本会针对截断 base
-重新计算 exact L2 ground truth：
+按数据集距离重新计算 exact ground truth；Cohere 使用 cosine 并保留 Parquet
+中的真实训练 ID：
 
 ```bash
 python \
