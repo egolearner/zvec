@@ -1,0 +1,82 @@
+{
+  "build": {
+    "elasticsearch": {
+      "details": {
+        "bulk_client_threads": 8,
+        "bulk_queue_size": 4,
+        "ef_construction": 100,
+        "force_merged": true,
+        "index": "cohere-medium-1m-hnsw-bbq",
+        "index_type": "bbq_hnsw",
+        "m": 16,
+        "metric": "cosine",
+        "replicas": 0,
+        "segment_count": 1,
+        "server_threads": "controlled by Elasticsearch node CPU allocation",
+        "shards": 1,
+        "source_enabled": false,
+        "storage_scope": "primary shard store including retained raw vectors",
+        "store_stability_samples": 33,
+        "store_stabilization_included_in_total_seconds": false,
+        "store_stabilization_seconds": 32.11599342525005,
+        "version": "8.18.8"
+      },
+      "dimension": 768,
+      "engine": "elasticsearch",
+      "finalize_seconds": 608.8055162224919,
+      "index_bytes": 5125115615,
+      "ingest_seconds": 284.9715472832322,
+      "total_seconds": 893.8497276306152,
+      "vector_count": 1000000,
+      "vectors_per_second": 1118.7562842926227
+    },
+    "zvec": {
+      "details": {
+        "build_threads": 8,
+        "ef_construction": 100,
+        "index_type": "HNSW_RABITQ",
+        "m": 16,
+        "metric": "COSINE",
+        "num_clusters": 16,
+        "path": "/home/jiliang.ljl/project/zvec/benchmark-results/cohere-one-bit/zvec",
+        "sample_count": 0,
+        "storage_scope": "entire Zvec collection directory",
+        "total_bits": 1
+      },
+      "dimension": 768,
+      "engine": "zvec",
+      "finalize_seconds": 281.15270322375,
+      "index_bytes": 3396975904,
+      "ingest_seconds": 54.447369165718555,
+      "total_seconds": 335.6076960340142,
+      "vector_count": 1000000,
+      "vectors_per_second": 2979.6694528085222
+    }
+  },
+  "config": {
+    "build_threads": 8,
+    "ef_construction": 100,
+    "m": 16,
+    "zvec_num_clusters": 16,
+    "zvec_sample_count": 0,
+    "zvec_total_bits": 1
+  },
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  },
+  "environment": {
+    "cpu_count": 16,
+    "hostname": "iZ2zee8awh28iudx70wzd7Z",
+    "platform": "Linux-5.10.134-19.2.al8.x86_64-x86_64-with-glibc2.32",
+    "python": "3.11.15"
+  }
+}

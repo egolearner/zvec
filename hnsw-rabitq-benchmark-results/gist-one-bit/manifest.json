@@ -1,0 +1,81 @@
+{
+  "build": {
+    "elasticsearch": {
+      "details": {
+        "bulk_client_threads": 8,
+        "bulk_queue_size": 4,
+        "ef_construction": 100,
+        "force_merged": true,
+        "index": "gist-hnsw-bbq",
+        "index_type": "bbq_hnsw",
+        "m": 16,
+        "metric": "l2_norm",
+        "replicas": 0,
+        "segment_count": 1,
+        "server_threads": "controlled by Elasticsearch node CPU allocation",
+        "shards": 1,
+        "source_enabled": false,
+        "storage_scope": "primary shard store including retained raw vectors",
+        "store_stability_samples": 30,
+        "store_stabilization_included_in_total_seconds": false,
+        "store_stabilization_seconds": 29.110647248104215,
+        "version": "8.18.8"
+      },
+      "dimension": 960,
+      "engine": "elasticsearch",
+      "finalize_seconds": 827.0152720566839,
+      "index_bytes": 5137334512,
+      "ingest_seconds": 338.16543741710484,
+      "total_seconds": 1165.258646067232,
+      "vector_count": 1000000,
+      "vectors_per_second": 858.1785712339637
+    },
+    "zvec": {
+      "details": {
+        "build_threads": 8,
+        "ef_construction": 100,
+        "index_type": "HNSW_RABITQ",
+        "m": 16,
+        "metric": "L2",
+        "num_clusters": 16,
+        "path": "/home/jiliang.ljl/project/zvec/benchmark-results/gist-one-bit/zvec",
+        "sample_count": 0,
+        "storage_scope": "entire Zvec collection directory",
+        "total_bits": 1
+      },
+      "dimension": 960,
+      "engine": "zvec",
+      "finalize_seconds": 342.6409606318921,
+      "index_bytes": 4193038187,
+      "ingest_seconds": 58.95794543810189,
+      "total_seconds": 401.60727617144585,
+      "vector_count": 1000000,
+      "vectors_per_second": 2489.994727020585
+    }
+  },
+  "config": {
+    "build_threads": 8,
+    "ef_construction": 100,
+    "m": 16,
+    "zvec_num_clusters": 16,
+    "zvec_sample_count": 0,
+    "zvec_total_bits": 1
+  },
+  "dataset": {
+    "base_count": 1000000,
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  },
+  "environment": {
+    "cpu_count": 16,
+    "hostname": "iZ2zee8awh28iudx70wzd7Z",
+    "platform": "Linux-5.10.134-19.2.al8.x86_64-x86_64-with-glibc2.32",
+    "python": "3.11.15"
+  }
+}

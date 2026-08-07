@@ -1,0 +1,52 @@
+{
+  "build": {
+    "zvec": {
+      "details": {
+        "build_threads": 8,
+        "ef_construction": 100,
+        "index_type": "HNSW_RABITQ",
+        "m": 16,
+        "metric": "COSINE",
+        "num_clusters": 16,
+        "path": "/home/jiliang.ljl/project/zvec/benchmark-results/cohere-seven-bit/zvec",
+        "sample_count": 0,
+        "storage_scope": "entire Zvec collection directory",
+        "total_bits": 7
+      },
+      "dimension": 768,
+      "engine": "zvec",
+      "finalize_seconds": 324.9739633258432,
+      "index_bytes": 4006219040,
+      "ingest_seconds": 55.7824475094676,
+      "total_seconds": 380.7657828312367,
+      "vector_count": 1000000,
+      "vectors_per_second": 2626.286407786859
+    }
+  },
+  "config": {
+    "build_threads": 8,
+    "ef_construction": 100,
+    "m": 16,
+    "zvec_num_clusters": 16,
+    "zvec_sample_count": 0,
+    "zvec_total_bits": 7
+  },
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  },
+  "environment": {
+    "cpu_count": 16,
+    "hostname": "iZ2zee8awh28iudx70wzd7Z",
+    "platform": "Linux-5.10.134-19.2.al8.x86_64-x86_64-with-glibc2.32",
+    "python": "3.11.15"
+  }
+}
