@@ -1,0 +1,52 @@
+{
+  "build": {
+    "zvec": {
+      "details": {
+        "build_threads": 8,
+        "ef_construction": 100,
+        "index_type": "HNSW_RABITQ",
+        "m": 16,
+        "metric": "L2",
+        "num_clusters": 16,
+        "path": "/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit/zvec",
+        "sample_count": 0,
+        "storage_scope": "entire Zvec collection directory",
+        "total_bits": 7
+      },
+      "dimension": 960,
+      "engine": "zvec",
+      "finalize_seconds": 272.9913728069514,
+      "index_bytes": 4928360304,
+      "ingest_seconds": 51.23647303134203,
+      "total_seconds": 324.2354018948972,
+      "vector_count": 1000000,
+      "vectors_per_second": 3084.17894577766
+    }
+  },
+  "config": {
+    "build_threads": 8,
+    "ef_construction": 100,
+    "m": 16,
+    "zvec_num_clusters": 16,
+    "zvec_sample_count": 0,
+    "zvec_total_bits": 7
+  },
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  },
+  "environment": {
+    "cpu_count": 16,
+    "hostname": "iZ2zee8awh28iudx70wzd7Z",
+    "platform": "Linux-5.10.134-19.2.al8.x86_64-x86_64-with-glibc2.32",
+    "python": "3.11.15"
+  }
+}

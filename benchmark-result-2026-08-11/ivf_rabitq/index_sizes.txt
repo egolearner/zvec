@@ -1,0 +1,8 @@
+cohere-faiss-1.ivf                    143.4 MiB
+cohere-faiss-7.ivf                    899.1 MiB
+cohere-zvec-1.ivf                     122.0 MiB
+cohere-zvec-7.ivf                     679.0 MiB
+gist-faiss-1.ivf                      143.4 MiB
+gist-faiss-7.ivf                      899.5 MiB
+gist-zvec-1.ivf                       147.0 MiB
+gist-zvec-7.ivf                       841.2 MiB
