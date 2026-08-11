@@ -39,8 +39,10 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh smoke --overwrite
 bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all --overwrite
 ```
 
-一键入口默认运行 Zvec `total_bits=1` 对 ES BBQ 无 `rescore_vector` 的纯 1-bit
-实验。完整的新机器准备、CPU 选择、Docker、远端 ES 和数据换路径说明见
+一键入口默认运行 Zvec `total_bits=1`、关闭 refine，对 ES BBQ 无
+`rescore_vector` 的纯 1-bit 实验。已有索引可追加执行
+`search --engines zvec --zvec-refine`，得到 Zvec 1-bit + raw-vector refine
+结果。完整的新机器准备、CPU 选择、Docker、远端 ES 和数据换路径说明见
 [`RUN_ON_ANOTHER_MACHINE.md`](RUN_ON_ANOTHER_MACHINE.md)。
 
 ## 1. 实验目标和口径
@@ -60,22 +62,40 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all --overwrite
 实现并不相同，因此不是逐指令的同算法 microbenchmark。Elasticsearch 索引仍会
 在磁盘保留原始 FP32 vector，但本实验查询不使用原向量重排。
 
-### 1.2 补充实验：高 Recall 生产配置
+### 1.2 补充实验：Zvec 1-bit 开启 refine
 
-如需比较两套产品各自面向高 Recall 的工作方式，另外执行：
+Zvec HNSW-RaBitQ 可以在查询时传 `is_using_refiner=True`，使用保存的原始向量
+重新计算粗排结果的距离。benchmark 的 `--zvec-refine` 会开启该路径；它是查询
+参数，不需要重建 `total_bits=1` 索引。
 
-1. Zvec `total_bits=7` 对 Elasticsearch BBQ `oversample=3`。
-2. 保持 Zvec 不变，将 Elasticsearch 调整为 `oversample=5`，观察更高 Recall
-   区域的 QPS、存储和内存代价。
+HNSW-RaBitQ 没有独立的 refine oversampling 参数。开启 refine 后，`ef` 会作为
+每个底层 index block 的内部 top-k：RaBitQ 粗召回 `ef` 条候选，再用原始向量
+精排得到用户请求的 `topk`，最后进行多 block 结果合并。实现对 `ef < topk` 的
+情况使用 `max(topk, ef)`；本 benchmark 默认 `topk=10`、`ef=32..1000`，所以
+内部 top-k 就是 `ef`，相当于 3.2–100 倍用户 top-k。同一个 `ef` 同时控制 HNSW
+遍历和精排候选窗口。精确距离会改变排序以及多 block 合并后的最终 top-k，所以
+Recall@1 和 Recall@K 都可能变化。结果文件会记录 `raw_vector_refine=true` 和
+`refine_candidate_rule="max(topk, ef)"`；每行已有 `topk` 和 `search_value=ef`，
+可据此得到该点的请求候选数。
+
+Elasticsearch 的 `rescore_vector.oversample` 是独立于 `num_candidates` 的重排
+倍数，语义并不相同。
+建议按下面的独立配置分组比较 Recall–QPS 曲线：
+
+1. Zvec 1-bit 无 refine，对 ES BBQ 无 `rescore_vector`；
+2. Zvec 1-bit 开启 refine，对同一个 ES 无 `rescore_vector` 基线；
+3. 如需考察两边各自的 raw-vector 路径，再单独增加 ES `oversample=3` 或 `5`
+   曲线，不把相同参数数值解释成相同候选工作量。
 
 Elasticsearch 8.18 中不传 `rescore_vector` 即不精排；更新版本可能引入默认
 oversampling，所以所有实验都必须固定并记录具体 ES patch 版本。
 
 ### 1.3 检索不是比较一个“相同参数点”
 
-Zvec 的 `ef` 与 Elasticsearch 的 `num_candidates` 含义不同，数值相同不代表
-工作量相同。脚本分别扫描同一组数值，输出 Recall–QPS 点；结论应来自每个线程
-数下的 Pareto 曲线，或固定 Recall（如 0.90/0.95/0.99）处插值后的 QPS。
+Zvec 的 `ef` 与 Elasticsearch 的 `num_candidates` 含义不同，Zvec refine 与
+Elasticsearch oversampling 也不等价，数值相同不代表工作量相同。脚本分别扫描
+同一组数值，输出 Recall–QPS 点；结论应来自每个线程数下的 Pareto 曲线，或固定
+Recall（如 0.90/0.95/0.99）处插值后的 QPS。
 
 每个 `(engine, search_value, threads)` 点执行：
 
@@ -274,6 +294,25 @@ taskset -c "$BENCH_CPUS" python \
   --zvec-total-bits 1
 ```
 
+在同一份 1-bit Zvec 索引上开启 raw-vector refine：
+
+```bash
+taskset -c "$BENCH_CPUS" python \
+  tools/benchmark/hnsw_rabitq_vs_es/benchmark.py \
+  --dataset "$ZVEC_BENCH_DATASET" \
+  --work-dir "$ZVEC_BENCH_WORK_DIR" \
+  --mode search --engines zvec \
+  --m 16 --ef-construction 100 \
+  --search-values 32,64,128,256,512,1000 \
+  --search-threads 1,4,8,16 \
+  --warmup-queries 1000 --duration-seconds 10 --repeats 3 \
+  --zvec-total-bits 1 --zvec-refine
+```
+
+若先运行无 refine 的两引擎主实验，再运行上面的 Zvec-only 命令，三组结果会
+追加到同一个 `search-results.jsonl`；可按 `engine` 和
+`details.raw_vector_refine` 区分。不要再次运行 ES 基线，以免产生重复点。
+
 Elasticsearch：
 
 ```bash
@@ -333,7 +372,8 @@ python \
 `--work-dir` 下生成：
 
 - `manifest.json`：数据集签名、构建配置、环境和构建结果；
-- `search-results.jsonl`：每个并发数、搜索参数点的 QPS/Recall；
+- `search-results.jsonl`：每个并发数、搜索参数点的 QPS/Recall；Zvec 结果中的
+  `details.raw_vector_refine` 标记是否开启 refine；
 - `zvec/`：Zvec collection；Elasticsearch index 保存在 ES data path。
 
 报告至少包含四张 Recall@10–QPS 图（1/4/8/16 线程）、构建时间分解、最终存储、

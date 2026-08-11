@@ -56,6 +56,9 @@ Elasticsearch options:
 
 Benchmark options:
   --zvec-total-bits N
+  --zvec-refine      Use ef as Zvec's internal top-k, then raw-vector refine
+                     to the user top-k; may also be set with
+                     ZVEC_BENCH_ZVEC_REFINE=1.
   --es-rescore-oversample VALUE  Number in (1,10), or "none".
   --build-threads N
   --search-threads LIST
@@ -70,7 +73,7 @@ Benchmark options:
   -h, --help
 
 The defaults form the pure 1-bit comparison:
-  Zvec total_bits=1, Elasticsearch BBQ without rescore_vector.
+  Zvec total_bits=1 without refine, Elasticsearch BBQ without rescore_vector.
 EOF
 }
 
@@ -118,6 +121,7 @@ ES_CONTAINER="${ZVEC_BENCH_ES_CONTAINER:-zvec-es-bbq-benchmark-8-18}"
 ES_VOLUME="${ZVEC_BENCH_ES_VOLUME:-zvec-es-bbq-benchmark-data}"
 ES_JAVA_OPTS="${ZVEC_BENCH_ES_JAVA_OPTS:--Xms4g -Xmx4g}"
 ZVEC_TOTAL_BITS="${ZVEC_BENCH_ZVEC_TOTAL_BITS:-1}"
+ZVEC_REFINE="${ZVEC_BENCH_ZVEC_REFINE:-0}"
 ES_RESCORE_OVERSAMPLE="${ZVEC_BENCH_ES_RESCORE_OVERSAMPLE:-none}"
 BUILD_THREADS="${ZVEC_BENCH_BUILD_THREADS:-16}"
 SEARCH_THREADS="${ZVEC_BENCH_SEARCH_THREADS:-1,4,8,16}"
@@ -197,6 +201,10 @@ while [[ $# -gt 0 ]]; do
       require_value "$@"
       ZVEC_TOTAL_BITS="${2}"
       shift 2
+      ;;
+    --zvec-refine)
+      ZVEC_REFINE=1
+      shift
       ;;
     --es-rescore-oversample)
       require_value "$@"
@@ -279,6 +287,18 @@ case "${ENGINES}" in
     ;;
 esac
 
+case "${ZVEC_REFINE,,}" in
+  1|true|yes|on)
+    ZVEC_REFINE=1
+    ;;
+  0|false|no|off)
+    ZVEC_REFINE=0
+    ;;
+  *)
+    fail_usage "ZVEC_BENCH_ZVEC_REFINE must be a boolean value"
+    ;;
+esac
+
 if [[ -z "${ES_URL}" ]]; then
   ES_URL="http://127.0.0.1:${ES_PORT}"
 fi
@@ -314,6 +334,7 @@ echo "ENGINES=${ENGINES}"
 echo "ES_URL=${ES_URL}"
 echo "ES_INDEX=${ES_INDEX}"
 echo "ZVEC_TOTAL_BITS=${ZVEC_TOTAL_BITS}"
+echo "ZVEC_REFINE=${ZVEC_REFINE}"
 echo "ES_RESCORE_OVERSAMPLE=${ES_RESCORE_OVERSAMPLE}"
 echo "ALLOW_DATASET_RELOCATION=${ALLOW_DATASET_RELOCATION}"
 
@@ -505,11 +526,16 @@ build_indexes() {
 
 search_indexes() {
   if wants_zvec; then
+    local zvec_refine_args=()
+    if [[ "${ZVEC_REFINE}" == "1" ]]; then
+      zvec_refine_args=(--zvec-refine)
+    fi
     run_benchmark \
       --mode search \
       --engines zvec \
       --zvec-total-bits "${ZVEC_TOTAL_BITS}" \
-      --zvec-num-clusters 16
+      --zvec-num-clusters 16 \
+      "${zvec_refine_args[@]}"
   fi
   if wants_es; then
     run_benchmark \

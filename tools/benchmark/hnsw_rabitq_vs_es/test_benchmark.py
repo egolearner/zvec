@@ -356,6 +356,69 @@ def test_zvec_metric_type_uses_cosine_for_cohere() -> None:
     assert benchmark.zvec_metric_type(fake_zvec, "cosine") is MetricType.COSINE
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [([], False), (["--zvec-refine"], True)],
+)
+def test_zvec_refine_cli_is_explicit(extra_args: list[str], expected: bool) -> None:
+    args = benchmark.build_parser().parse_args(
+        ["--dataset", "/data/gist.hdf5", *extra_args]
+    )
+
+    assert args.zvec_refine is expected
+
+
+def test_zvec_search_callable_passes_refine_to_query_param() -> None:
+    query_params: list[dict[str, object]] = []
+    queries: list[Namespace] = []
+
+    class FakeZvec:
+        @staticmethod
+        def HnswRabitqQueryParam(**kwargs: object) -> Namespace:
+            query_params.append(kwargs)
+            return Namespace(**kwargs)
+
+        @staticmethod
+        def Query(**kwargs: object) -> Namespace:
+            query = Namespace(**kwargs)
+            queries.append(query)
+            return query
+
+    class FakeCollection:
+        @staticmethod
+        def query(query: Namespace, topk: int) -> list[Namespace]:
+            assert query is queries[-1]
+            assert topk == 2
+            return [Namespace(id="30"), Namespace(id="10")]
+
+    search = benchmark.zvec_search_callable(
+        FakeCollection(), FakeZvec(), topk=2, use_refiner=True
+    )
+
+    assert search(np.array([1.0, 0.0], dtype=np.float32), 64) == [30, 10]
+    assert query_params == [{"ef": 64, "is_using_refiner": True}]
+    assert queries[0].param.is_using_refiner is True
+
+
+@pytest.mark.parametrize(
+    ("refine", "candidate_rule"),
+    [(False, None), (True, "max(topk, ef)")],
+)
+def test_zvec_search_details_preserve_rescore_compatibility(
+    refine: bool, candidate_rule: str | None
+) -> None:
+    details = benchmark.zvec_search_details(
+        Namespace(zvec_total_bits=1, zvec_refine=refine)
+    )
+
+    assert details == {
+        "total_bits": 1,
+        "raw_vector_rescore": refine,
+        "raw_vector_refine": refine,
+        "refine_candidate_rule": candidate_rule,
+    }
+
+
 def test_wait_for_stable_es_primary_stats_ignores_transient_store_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -417,6 +480,7 @@ def test_portable_runner_help_documents_machine_specific_paths() -> None:
     assert "--work-dir PATH" in result.stdout
     assert "--cpus LIST" in result.stdout
     assert "ZVEC_BENCH_DATASET" in result.stdout
+    assert "ZVEC_BENCH_ZVEC_REFINE" in result.stdout
     assert "Cohere Parquet directory" in result.stdout
 
 
@@ -460,6 +524,7 @@ def test_portable_runner_dry_run_uses_explicit_machine_configuration(
             "29200",
             "--es-index",
             "portable-gist",
+            "--zvec-refine",
             "--allow-dataset-relocation",
             "--overwrite",
             "--dry-run",
@@ -474,6 +539,7 @@ def test_portable_runner_dry_run_uses_explicit_machine_configuration(
     assert "/opt/zvec-venv/bin/python" in result.stdout
     assert "data\\ set.hdf5" in result.stdout
     assert "--zvec-total-bits 1" in result.stdout
+    assert "--zvec-refine" in result.stdout
     assert "--es-rescore-oversample none" in result.stdout
     assert "--es-index portable-gist" in result.stdout
     assert "--allow-dataset-relocation" in result.stdout
@@ -577,6 +643,7 @@ def test_portable_runner_isolates_smoke_indexes_from_full_run(
     assert result.returncode == 0, result.stderr
     assert f"--work-dir {work_dir}/smoke" in result.stdout
     assert "--es-index gist-bbq-smoke" in result.stdout
+    assert "--zvec-refine" not in result.stdout
 
 
 def test_manifest_allows_explicit_dataset_relocation() -> None:

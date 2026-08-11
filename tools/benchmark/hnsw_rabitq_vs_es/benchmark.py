@@ -1474,19 +1474,36 @@ def benchmark_search(
     return results
 
 
-def zvec_search_callable(collection: Any, zvec: Any, topk: int) -> SearchCallable:
+def zvec_search_callable(
+    collection: Any,
+    zvec: Any,
+    topk: int,
+    use_refiner: bool,
+) -> SearchCallable:
     def search(vector: np.ndarray, ef: int) -> list[int]:
         docs = collection.query(
             zvec.Query(
                 field_name=VECTOR_FIELD,
                 vector=vector,
-                param=zvec.HnswRabitqQueryParam(ef=ef),
+                param=zvec.HnswRabitqQueryParam(
+                    ef=ef,
+                    is_using_refiner=use_refiner,
+                ),
             ),
             topk=topk,
         )
         return [int(doc.id) for doc in docs]
 
     return search
+
+
+def zvec_search_details(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "total_bits": args.zvec_total_bits,
+        "raw_vector_rescore": args.zvec_refine,
+        "raw_vector_refine": args.zvec_refine,
+        "refine_candidate_rule": "max(topk, ef)" if args.zvec_refine else None,
+    }
 
 
 def elasticsearch_search_callable(
@@ -1592,6 +1609,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--zvec-total-bits", type=parse_positive_int, default=7)
     parser.add_argument("--zvec-num-clusters", type=parse_positive_int, default=16)
+    parser.add_argument(
+        "--zvec-refine",
+        action="store_true",
+        help=(
+            "Use ef as Zvec HNSW-RaBitQ's internal top-k, then refine with "
+            "raw vectors to the user top-k (internally max(topk, ef))."
+        ),
+    )
     parser.add_argument(
         "--zvec-sample-count",
         type=parse_nonnegative_int,
@@ -1779,15 +1804,17 @@ def run_search_phase(
         results = benchmark_search(
             "zvec",
             "ef",
-            zvec_search_callable(collection, clients.zvec, args.topk),
+            zvec_search_callable(
+                collection,
+                clients.zvec,
+                args.topk,
+                args.zvec_refine,
+            ),
             queries,
             ground_truth,
             info,
             args,
-            {
-                "total_bits": args.zvec_total_bits,
-                "raw_vector_rescore": False,
-            },
+            zvec_search_details(args),
         )
         append_search_results(args.work_dir, results)
         del collection

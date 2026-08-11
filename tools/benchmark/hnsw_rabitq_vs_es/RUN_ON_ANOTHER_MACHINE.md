@@ -5,6 +5,7 @@
 - Zvec `HNSW_RABITQ total_bits=1`
 - Elasticsearch 8.18.8 `bbq_hnsw`
 - Elasticsearch 查询不传 `rescore_vector`
+- 可选的 Zvec raw-vector refine
 - 1、4、8、16 个客户端线程的 QPS 和 Recall@10
 
 一键脚本默认就是上述纯 1-bit 配置。所有机器相关路径、CPU、Docker 名称和
@@ -185,6 +186,7 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
 | 参数 | 默认值 |
 |---|---|
 | Zvec 量化 | `total_bits=1`, `num_clusters=16` |
+| Zvec refine | 关闭 |
 | ES 量化 | `bbq_hnsw` |
 | ES 精排 | `none`，请求不含 `rescore_vector` |
 | HNSW | `M=16`, `ef_construction=100` |
@@ -219,6 +221,33 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh build \
 bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
   --engines zvec
 ```
+
+默认实验完成后，可以复用同一份 Zvec 1-bit 索引，追加开启 refine 的检索结果：
+
+```bash
+bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
+  --engines zvec \
+  --zvec-refine
+```
+
+也可以用环境变量启用：
+
+```bash
+export ZVEC_BENCH_ZVEC_REFINE=1
+bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
+  --engines zvec
+```
+
+`--zvec-refine` 只改变查询，不需要重建索引。开启后，`ef` 会作为每个底层
+index block 的内部 top-k：RaBitQ 粗召回 `ef` 条，再用原始向量精排得到用户的
+`topk`，最后合并各 block 结果。实现对 `ef < topk` 的情况使用
+`max(topk, ef)`；默认 sweep 中 `ef >= 32`、`topk=10`，所以内部 top-k 就是
+`ef`。没有独立的 ES 式 `oversample` 参数，同一个 `ef` 同时控制图遍历和精排
+候选窗口。精确距离可能改变多 block 合并后的最终 top-k。结果中的
+`details.raw_vector_refine=true` 和
+`details.refine_candidate_rule="max(topk, ef)"` 会标识这组数据；结合每行的
+`topk` 和 `search_value=ef` 可得到请求候选数。建议先跑默认的无 refine 两引擎
+基线，再只追加 Zvec refine，避免重复写入 ES 基线点。
 
 ## 8. 数据换路径或复制到另一台机器
 
@@ -326,14 +355,18 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
   --overwrite
 ```
 
-切换到原来的高 Recall 生产配置：
+同时考察两边各自的 raw-vector 路径：
 
 ```bash
-bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh all \
-  --zvec-total-bits 7 \
+bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search \
+  --zvec-refine \
   --es-rescore-oversample 3 \
-  --overwrite
+  --engines both
 ```
+
+注意 ES `oversample=3` 是独立重排倍数，而 Zvec HNSW-RaBitQ refine 对每个底层
+block 的 `max(topk, ef)` 个候选精排后再合并，不能把两者视为相同参数点。应按
+各自的 Recall–QPS 曲线比较。
 
 完整参数：
 
@@ -346,7 +379,8 @@ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh --help
 `ZVEC_BENCH_WORK_DIR` 下生成：
 
 - `manifest.json`：数据签名、环境、构建配置和构建结果
-- `search-results.jsonl`：每个引擎、线程数、搜索参数的 Recall/QPS 和原始重复值
+- `search-results.jsonl`：每个引擎、线程数、搜索参数的 Recall/QPS、refine/rescore
+  配置和原始重复值
 - `zvec/`：Zvec collection
 
 ES 索引保存在配置的 Docker volume 中。正式汇总前检查：
