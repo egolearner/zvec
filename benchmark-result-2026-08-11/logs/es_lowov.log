@@ -1,0 +1,270 @@
++ cd /home/jiliang.ljl/project/zvec
++ export PYTHONPATH=/tmp/zvec-pypath
++ PYTHONPATH=/tmp/zvec-pypath
++ export ZVEC_BENCH_PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
++ ZVEC_BENCH_PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
++ export ZVEC_BENCH_CPUS=0,2,4,6,8,10,12,14
++ ZVEC_BENCH_CPUS=0,2,4,6,8,10,12,14
++ export ZVEC_BENCH_BUILD_THREADS=8
++ ZVEC_BENCH_BUILD_THREADS=8
++ export ZVEC_BENCH_SEARCH_THREADS=1,4,8,16
++ ZVEC_BENCH_SEARCH_THREADS=1,4,8,16
++ export ZVEC_BENCH_DURATION_SECONDS=10
++ ZVEC_BENCH_DURATION_SECONDS=10
++ export ZVEC_BENCH_REPEATS=3
++ ZVEC_BENCH_REPEATS=3
++ export ZVEC_BENCH_WARMUP_QUERIES=1000
++ ZVEC_BENCH_WARMUP_QUERIES=1000
++ export ZVEC_BENCH_DATASET=/data/cohere_medium_1m
++ ZVEC_BENCH_DATASET=/data/cohere_medium_1m
++ export ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
++ ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
++ export ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
++ ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
++ R=tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh
++ for ov in 1.1 1.25 1.5 1.75
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines elasticsearch --es-rescore-oversample 1.1 --search-values 32,64,128,256,512,1000,2000
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=elasticsearch
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=1.1
+ALLOW_DATASET_RELOCATION=0
+Elasticsearch container is already running: zvec-es-bbq-benchmark-8-18
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000\,2000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines elasticsearch --es-url http://127.0.0.1:19200 --es-index cohere-medium-1m-hnsw-bbq --es-rescore-oversample 1.1
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+elasticsearch threads= 1 num_candidates=  32 qps=    743.47 recall@10=0.8575
+elasticsearch threads= 1 num_candidates=  64 qps=    675.23 recall@10=0.9072
+elasticsearch threads= 1 num_candidates= 128 qps=    544.87 recall@10=0.9349
+elasticsearch threads= 1 num_candidates= 256 qps=    401.24 recall@10=0.9551
+elasticsearch threads= 1 num_candidates= 512 qps=    279.35 recall@10=0.9711
+elasticsearch threads= 1 num_candidates=1000 qps=    177.06 recall@10=0.9785
+elasticsearch threads= 1 num_candidates=2000 qps=    103.78 recall@10=0.9858
+elasticsearch threads= 4 num_candidates=  32 qps=   1447.27 recall@10=0.8575
+elasticsearch threads= 4 num_candidates=  64 qps=   1396.29 recall@10=0.9072
+elasticsearch threads= 4 num_candidates= 128 qps=   1322.82 recall@10=0.9349
+elasticsearch threads= 4 num_candidates= 256 qps=   1174.49 recall@10=0.9551
+elasticsearch threads= 4 num_candidates= 512 qps=    931.83 recall@10=0.9711
+elasticsearch threads= 4 num_candidates=1000 qps=    667.77 recall@10=0.9785
+elasticsearch threads= 4 num_candidates=2000 qps=    422.72 recall@10=0.9858
+elasticsearch threads= 8 num_candidates=  32 qps=   1477.07 recall@10=0.8575
+elasticsearch threads= 8 num_candidates=  64 qps=   1470.24 recall@10=0.9072
+elasticsearch threads= 8 num_candidates= 128 qps=   1456.59 recall@10=0.9349
+elasticsearch threads= 8 num_candidates= 256 qps=   1434.33 recall@10=0.9551
+elasticsearch threads= 8 num_candidates= 512 qps=   1377.35 recall@10=0.9711
+elasticsearch threads= 8 num_candidates=1000 qps=   1119.61 recall@10=0.9785
+elasticsearch threads= 8 num_candidates=2000 qps=    751.75 recall@10=0.9858
+elasticsearch threads=16 num_candidates=  32 qps=   1488.60 recall@10=0.8575
+elasticsearch threads=16 num_candidates=  64 qps=   1480.52 recall@10=0.9072
+elasticsearch threads=16 num_candidates= 128 qps=   1480.44 recall@10=0.9349
+elasticsearch threads=16 num_candidates= 256 qps=   1468.54 recall@10=0.9551
+elasticsearch threads=16 num_candidates= 512 qps=   1460.71 recall@10=0.9711
+elasticsearch threads=16 num_candidates=1000 qps=   1272.11 recall@10=0.9785
+elasticsearch threads=16 num_candidates=2000 qps=    840.90 recall@10=0.9858
++ echo LOWOV_DONE_ov1.1
+LOWOV_DONE_ov1.1
++ for ov in 1.1 1.25 1.5 1.75
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines elasticsearch --es-rescore-oversample 1.25 --search-values 32,64,128,256,512,1000,2000
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=elasticsearch
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=1.25
+ALLOW_DATASET_RELOCATION=0
+Elasticsearch container is already running: zvec-es-bbq-benchmark-8-18
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000\,2000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines elasticsearch --es-url http://127.0.0.1:19200 --es-index cohere-medium-1m-hnsw-bbq --es-rescore-oversample 1.25
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+elasticsearch threads= 1 num_candidates=  32 qps=    804.57 recall@10=0.8681
+elasticsearch threads= 1 num_candidates=  64 qps=    686.88 recall@10=0.9116
+elasticsearch threads= 1 num_candidates= 128 qps=    549.97 recall@10=0.9375
+elasticsearch threads= 1 num_candidates= 256 qps=    394.10 recall@10=0.9588
+elasticsearch threads= 1 num_candidates= 512 qps=    260.73 recall@10=0.9731
+elasticsearch threads= 1 num_candidates=1000 qps=    161.94 recall@10=0.9805
+elasticsearch threads= 1 num_candidates=2000 qps=     94.24 recall@10=0.9868
+elasticsearch threads= 4 num_candidates=  32 qps=   1456.22 recall@10=0.8681
+elasticsearch threads= 4 num_candidates=  64 qps=   1398.27 recall@10=0.9116
+elasticsearch threads= 4 num_candidates= 128 qps=   1324.87 recall@10=0.9375
+elasticsearch threads= 4 num_candidates= 256 qps=   1140.09 recall@10=0.9588
+elasticsearch threads= 4 num_candidates= 512 qps=    887.46 recall@10=0.9731
+elasticsearch threads= 4 num_candidates=1000 qps=    629.02 recall@10=0.9805
+elasticsearch threads= 4 num_candidates=2000 qps=    392.82 recall@10=0.9868
+elasticsearch threads= 8 num_candidates=  32 qps=   1480.84 recall@10=0.8681
+elasticsearch threads= 8 num_candidates=  64 qps=   1474.90 recall@10=0.9116
+elasticsearch threads= 8 num_candidates= 128 qps=   1463.17 recall@10=0.9375
+elasticsearch threads= 8 num_candidates= 256 qps=   1438.30 recall@10=0.9588
+elasticsearch threads= 8 num_candidates= 512 qps=   1356.14 recall@10=0.9731
+elasticsearch threads= 8 num_candidates=1000 qps=   1057.92 recall@10=0.9805
+elasticsearch threads= 8 num_candidates=2000 qps=    693.66 recall@10=0.9868
+elasticsearch threads=16 num_candidates=  32 qps=   1487.76 recall@10=0.8681
+elasticsearch threads=16 num_candidates=  64 qps=   1490.79 recall@10=0.9116
+elasticsearch threads=16 num_candidates= 128 qps=   1471.34 recall@10=0.9375
+elasticsearch threads=16 num_candidates= 256 qps=   1475.02 recall@10=0.9588
+elasticsearch threads=16 num_candidates= 512 qps=   1426.71 recall@10=0.9731
+elasticsearch threads=16 num_candidates=1000 qps=   1129.67 recall@10=0.9805
+elasticsearch threads=16 num_candidates=2000 qps=    715.44 recall@10=0.9868
++ echo LOWOV_DONE_ov1.25
+LOWOV_DONE_ov1.25
++ for ov in 1.1 1.25 1.5 1.75
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines elasticsearch --es-rescore-oversample 1.5 --search-values 32,64,128,256,512,1000,2000
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=elasticsearch
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=1.5
+ALLOW_DATASET_RELOCATION=0
+Elasticsearch container is already running: zvec-es-bbq-benchmark-8-18
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000\,2000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines elasticsearch --es-url http://127.0.0.1:19200 --es-index cohere-medium-1m-hnsw-bbq --es-rescore-oversample 1.5
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+elasticsearch threads= 1 num_candidates=  32 qps=    755.88 recall@10=0.8791
+elasticsearch threads= 1 num_candidates=  64 qps=    635.42 recall@10=0.9239
+elasticsearch threads= 1 num_candidates= 128 qps=    482.13 recall@10=0.9459
+elasticsearch threads= 1 num_candidates= 256 qps=    340.66 recall@10=0.9635
+elasticsearch threads= 1 num_candidates= 512 qps=    215.36 recall@10=0.9750
+elasticsearch threads= 1 num_candidates=1000 qps=    132.01 recall@10=0.9821
+elasticsearch threads= 1 num_candidates=2000 qps=     74.72 recall@10=0.9878
+elasticsearch threads= 4 num_candidates=  32 qps=   1429.78 recall@10=0.8791
+elasticsearch threads= 4 num_candidates=  64 qps=   1363.57 recall@10=0.9239
+elasticsearch threads= 4 num_candidates= 128 qps=   1251.53 recall@10=0.9459
+elasticsearch threads= 4 num_candidates= 256 qps=   1019.29 recall@10=0.9635
+elasticsearch threads= 4 num_candidates= 512 qps=    761.81 recall@10=0.9750
+elasticsearch threads= 4 num_candidates=1000 qps=    523.07 recall@10=0.9821
+elasticsearch threads= 4 num_candidates=2000 qps=    306.59 recall@10=0.9878
+elasticsearch threads= 8 num_candidates=  32 qps=   1473.62 recall@10=0.8791
+elasticsearch threads= 8 num_candidates=  64 qps=   1464.38 recall@10=0.9239
+elasticsearch threads= 8 num_candidates= 128 qps=   1446.92 recall@10=0.9459
+elasticsearch threads= 8 num_candidates= 256 qps=   1413.22 recall@10=0.9635
+elasticsearch threads= 8 num_candidates= 512 qps=   1232.82 recall@10=0.9750
+elasticsearch threads= 8 num_candidates=1000 qps=    888.45 recall@10=0.9821
+elasticsearch threads= 8 num_candidates=2000 qps=    548.14 recall@10=0.9878
+elasticsearch threads=16 num_candidates=  32 qps=   1487.42 recall@10=0.8791
+elasticsearch threads=16 num_candidates=  64 qps=   1484.58 recall@10=0.9239
+elasticsearch threads=16 num_candidates= 128 qps=   1477.39 recall@10=0.9459
+elasticsearch threads=16 num_candidates= 256 qps=   1472.29 recall@10=0.9635
+elasticsearch threads=16 num_candidates= 512 qps=   1390.02 recall@10=0.9750
+elasticsearch threads=16 num_candidates=1000 qps=    996.13 recall@10=0.9821
+elasticsearch threads=16 num_candidates=2000 qps=    637.74 recall@10=0.9878
++ echo LOWOV_DONE_ov1.5
+LOWOV_DONE_ov1.5
++ for ov in 1.1 1.25 1.5 1.75
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines elasticsearch --es-rescore-oversample 1.75 --search-values 32,64,128,256,512,1000,2000
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=elasticsearch
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=1.75
+ALLOW_DATASET_RELOCATION=0
+Elasticsearch container is already running: zvec-es-bbq-benchmark-8-18
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000\,2000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines elasticsearch --es-url http://127.0.0.1:19200 --es-index cohere-medium-1m-hnsw-bbq --es-rescore-oversample 1.75
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+elasticsearch threads= 1 num_candidates=  32 qps=    724.56 recall@10=0.8922
+elasticsearch threads= 1 num_candidates=  64 qps=    603.44 recall@10=0.9288
+elasticsearch threads= 1 num_candidates= 128 qps=    446.43 recall@10=0.9506
+elasticsearch threads= 1 num_candidates= 256 qps=    307.05 recall@10=0.9662
+elasticsearch threads= 1 num_candidates= 512 qps=    193.71 recall@10=0.9764
+elasticsearch threads= 1 num_candidates=1000 qps=    117.16 recall@10=0.9838
+elasticsearch threads= 1 num_candidates=2000 qps=     67.04 recall@10=0.9885
+elasticsearch threads= 4 num_candidates=  32 qps=   1418.88 recall@10=0.8922
+elasticsearch threads= 4 num_candidates=  64 qps=   1340.52 recall@10=0.9288
+elasticsearch threads= 4 num_candidates= 128 qps=   1243.82 recall@10=0.9506
+elasticsearch threads= 4 num_candidates= 256 qps=   1021.26 recall@10=0.9662
+elasticsearch threads= 4 num_candidates= 512 qps=    757.48 recall@10=0.9764
+elasticsearch threads= 4 num_candidates=1000 qps=    508.25 recall@10=0.9838
+elasticsearch threads= 4 num_candidates=2000 qps=    305.25 recall@10=0.9885
+elasticsearch threads= 8 num_candidates=  32 qps=   1474.31 recall@10=0.8922
+elasticsearch threads= 8 num_candidates=  64 qps=   1466.45 recall@10=0.9288
+elasticsearch threads= 8 num_candidates= 128 qps=   1445.97 recall@10=0.9506
+elasticsearch threads= 8 num_candidates= 256 qps=   1405.01 recall@10=0.9662
+elasticsearch threads= 8 num_candidates= 512 qps=   1230.60 recall@10=0.9764
+elasticsearch threads= 8 num_candidates=1000 qps=    882.01 recall@10=0.9838
+elasticsearch threads= 8 num_candidates=2000 qps=    547.48 recall@10=0.9885
+elasticsearch threads=16 num_candidates=  32 qps=   1480.90 recall@10=0.8922
+elasticsearch threads=16 num_candidates=  64 qps=   1479.59 recall@10=0.9288
+elasticsearch threads=16 num_candidates= 128 qps=   1470.13 recall@10=0.9506
+elasticsearch threads=16 num_candidates= 256 qps=   1468.37 recall@10=0.9662
+elasticsearch threads=16 num_candidates= 512 qps=   1388.66 recall@10=0.9764
+elasticsearch threads=16 num_candidates=1000 qps=    988.98 recall@10=0.9838
+elasticsearch threads=16 num_candidates=2000 qps=    613.23 recall@10=0.9885
++ echo LOWOV_DONE_ov1.75
+LOWOV_DONE_ov1.75
++ echo LOWOV_ALL_DONE
+LOWOV_ALL_DONE

@@ -1,0 +1,156 @@
++ cd /home/jiliang.ljl/project/zvec
++ export OMP_NUM_THREADS=16
++ OMP_NUM_THREADS=16
++ export OPENBLAS_NUM_THREADS=16
++ OPENBLAS_NUM_THREADS=16
++ OUT=/home/jiliang.ljl/benchmark-results/2026-08-11/ivf_rabitq
++ IDX=/tmp/bench/idx
++ mkdir -p /home/jiliang.ljl/benchmark-results/2026-08-11/ivf_rabitq /tmp/bench/idx
++ COMMON='--nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16'
++ run_set cohere '--dataset-dir /data/cohere_1m'
++ local tag=cohere
++ shift
++ local 'data=--dataset-dir /data/cohere_1m'
++ for bits in 1 7
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.gcc12/bin/ivf_rabitq_zvec_bench zvec
+++ date +%T
++ echo '=== cohere zvec 1bit 18:43:09 ==='
+=== cohere zvec 1bit 18:43:09 ===
++ ./build.gcc12/bin/ivf_rabitq_zvec_bench --dataset-dir /data/cohere_1m --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 1 --index /tmp/bench/idx/cohere-zvec-1.ivf
+++ date +%T
++ echo 'exit=0 18:45:19'
+exit=0 18:45:19
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss
+++ date +%T
++ echo '=== cohere faiss 1bit 18:45:19 ==='
+=== cohere faiss 1bit 18:45:19 ===
++ ./build.ivf-rabitq-compare/ivf_rabitq_faiss_bench --dataset-dir /data/cohere_1m --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 1 --index /tmp/bench/idx/cohere-faiss-1.ivf
+++ date +%T
++ echo 'exit=0 18:47:08'
+exit=0 18:47:08
++ for bits in 1 7
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.gcc12/bin/ivf_rabitq_zvec_bench zvec
+++ date +%T
++ echo '=== cohere zvec 7bit 18:47:08 ==='
+=== cohere zvec 7bit 18:47:08 ===
++ ./build.gcc12/bin/ivf_rabitq_zvec_bench --dataset-dir /data/cohere_1m --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 7 --index /tmp/bench/idx/cohere-zvec-7.ivf
+++ date +%T
++ echo 'exit=0 18:49:22'
+exit=0 18:49:22
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss
+++ date +%T
++ echo '=== cohere faiss 7bit 18:49:22 ==='
+=== cohere faiss 7bit 18:49:22 ===
++ ./build.ivf-rabitq-compare/ivf_rabitq_faiss_bench --dataset-dir /data/cohere_1m --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 7 --index /tmp/bench/idx/cohere-faiss-7.ivf
+++ date +%T
++ echo 'exit=0 18:52:50'
+exit=0 18:52:50
++ echo IVF_COHERE_DONE
+IVF_COHERE_DONE
++ run_set gist '--base /tmp/gist/vecs/base.fvecs --query /tmp/gist/vecs/query.fvecs --groundtruth /tmp/gist/vecs/groundtruth.ivecs'
++ local tag=gist
++ shift
++ local 'data=--base /tmp/gist/vecs/base.fvecs --query /tmp/gist/vecs/query.fvecs --groundtruth /tmp/gist/vecs/groundtruth.ivecs'
++ for bits in 1 7
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.gcc12/bin/ivf_rabitq_zvec_bench zvec
+++ date +%T
++ echo '=== gist zvec 1bit 18:52:50 ==='
+=== gist zvec 1bit 18:52:50 ===
++ ./build.gcc12/bin/ivf_rabitq_zvec_bench --base /tmp/gist/vecs/base.fvecs --query /tmp/gist/vecs/query.fvecs --groundtruth /tmp/gist/vecs/groundtruth.ivecs --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 1 --index /tmp/bench/idx/gist-zvec-1.ivf
+++ date +%T
++ echo 'exit=0 18:55:57'
+exit=0 18:55:57
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss
+++ date +%T
++ echo '=== gist faiss 1bit 18:55:57 ==='
+=== gist faiss 1bit 18:55:57 ===
++ ./build.ivf-rabitq-compare/ivf_rabitq_faiss_bench --base /tmp/gist/vecs/base.fvecs --query /tmp/gist/vecs/query.fvecs --groundtruth /tmp/gist/vecs/groundtruth.ivecs --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 1 --index /tmp/bench/idx/gist-faiss-1.ivf
+++ date +%T
++ echo 'exit=0 18:57:49'
+exit=0 18:57:49
++ for bits in 1 7
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.gcc12/bin/ivf_rabitq_zvec_bench zvec
+++ date +%T
++ echo '=== gist zvec 7bit 18:57:49 ==='
+=== gist zvec 7bit 18:57:49 ===
++ ./build.gcc12/bin/ivf_rabitq_zvec_bench --base /tmp/gist/vecs/base.fvecs --query /tmp/gist/vecs/query.fvecs --groundtruth /tmp/gist/vecs/groundtruth.ivecs --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 7 --index /tmp/bench/idx/gist-zvec-7.ivf
+++ date +%T
++ echo 'exit=0 19:01:01'
+exit=0 19:01:01
++ for e in "build.gcc12/bin/ivf_rabitq_zvec_bench zvec" "build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss"
++ set -- build.ivf-rabitq-compare/ivf_rabitq_faiss_bench faiss
+++ date +%T
++ echo '=== gist faiss 7bit 19:01:01 ==='
+=== gist faiss 7bit 19:01:01 ===
++ ./build.ivf-rabitq-compare/ivf_rabitq_faiss_bench --base /tmp/gist/vecs/base.fvecs --query /tmp/gist/vecs/query.fvecs --groundtruth /tmp/gist/vecs/groundtruth.ivecs --nlist 1024 --train-size 262144 --niters 20 --nprobes 1,2,4,8,16,32,64,128,256 --topk 10 --threads 16 --repeats 3 --warmup 50 --search-threads 1,4,8,16 --total-bits 7 --index /tmp/bench/idx/gist-faiss-7.ivf
+++ date +%T
++ echo 'exit=0 19:04:45'
+exit=0 19:04:45
++ echo IVF_GIST_DONE
+IVF_GIST_DONE
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/cohere-faiss-1.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/cohere-faiss-1.ivf
+++ echo 'scale=1; 150373896/1048576'
++ printf '%-32s %10.1f MiB\n' cohere-faiss-1.ivf 143.4
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/cohere-faiss-7.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/cohere-faiss-7.ivf
+++ echo 'scale=1; 942779016/1048576'
++ printf '%-32s %10.1f MiB\n' cohere-faiss-7.ivf 899.1
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/cohere-zvec-1.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/cohere-zvec-1.ivf
+++ echo 'scale=1; 128012928/1048576'
++ printf '%-32s %10.1f MiB\n' cohere-zvec-1.ivf 122.0
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/cohere-zvec-7.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/cohere-zvec-7.ivf
+++ echo 'scale=1; 712019872/1048576'
++ printf '%-32s %10.1f MiB\n' cohere-zvec-7.ivf 679.0
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/gist-faiss-1.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/gist-faiss-1.ivf
+++ echo 'scale=1; 150443528/1048576'
++ printf '%-32s %10.1f MiB\n' gist-faiss-1.ivf 143.4
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/gist-faiss-7.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/gist-faiss-7.ivf
+++ echo 'scale=1; 943248008/1048576'
++ printf '%-32s %10.1f MiB\n' gist-faiss-7.ivf 899.5
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/gist-zvec-1.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/gist-zvec-1.ivf
+++ echo 'scale=1; 154141536/1048576'
++ printf '%-32s %10.1f MiB\n' gist-zvec-1.ivf 147.0
++ for f in "$IDX"/*.ivf
+++ basename /tmp/bench/idx/gist-zvec-7.ivf
+++ bc
++++ stat -c%s /tmp/bench/idx/gist-zvec-7.ivf
+++ echo 'scale=1; 882133120/1048576'
++ printf '%-32s %10.1f MiB\n' gist-zvec-7.ivf 841.2
++ cat /home/jiliang.ljl/benchmark-results/2026-08-11/ivf_rabitq/index_sizes.txt
+cohere-faiss-1.ivf                    143.4 MiB
+cohere-faiss-7.ivf                    899.1 MiB
+cohere-zvec-1.ivf                     122.0 MiB
+cohere-zvec-7.ivf                     679.0 MiB
+gist-faiss-1.ivf                      143.4 MiB
+gist-faiss-7.ivf                      899.5 MiB
+gist-zvec-1.ivf                       147.0 MiB
+gist-zvec-7.ivf                       841.2 MiB
++ echo IVF_ALL_DONE
+IVF_ALL_DONE

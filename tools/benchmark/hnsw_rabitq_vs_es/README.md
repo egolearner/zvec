@@ -12,6 +12,11 @@ GIST 使用 ANN-Benchmarks HDF5 的 `train/test/neighbors`。Cohere 目录必须
 `id` 会原样写入两个引擎，并用于计算 Recall。脚本分批读取 base vectors，不会
 一次性把约 3 GB 数据全部载入内存。
 
+从零开始跑一次完整对比（Zvec 1-bit / 1-bit+refine / 7-bit 对 ES BBQ，
+1/4/8/16 线程，构建时长与索引大小）的逐步操作手册见
+[`RUNBOOK.md`](RUNBOOK.md)，结果汇总用
+[`summarize_results.py`](summarize_results.py)。
+
 ## 快速开始：可迁移的一键入口
 
 在其他 Linux 机器上优先使用 `run_comparison.sh`。数据、结果、CPU 和 ES 配置均可

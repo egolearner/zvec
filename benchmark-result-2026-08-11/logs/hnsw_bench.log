@@ -1,0 +1,813 @@
++ cd /home/jiliang.ljl/project/zvec
++ export PYTHONPATH=/tmp/zvec-pypath
++ PYTHONPATH=/tmp/zvec-pypath
++ export ZVEC_BENCH_PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
++ ZVEC_BENCH_PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
++ export ZVEC_BENCH_CPUS=0,2,4,6,8,10,12,14
++ ZVEC_BENCH_CPUS=0,2,4,6,8,10,12,14
++ export ZVEC_BENCH_BUILD_THREADS=8
++ ZVEC_BENCH_BUILD_THREADS=8
++ export ZVEC_BENCH_SEARCH_THREADS=1,4,8,16
++ ZVEC_BENCH_SEARCH_THREADS=1,4,8,16
++ export ZVEC_BENCH_SEARCH_VALUES=32,64,128,256,512,1000
++ ZVEC_BENCH_SEARCH_VALUES=32,64,128,256,512,1000
++ export ZVEC_BENCH_DURATION_SECONDS=10
++ ZVEC_BENCH_DURATION_SECONDS=10
++ export ZVEC_BENCH_REPEATS=3
++ ZVEC_BENCH_REPEATS=3
++ export ZVEC_BENCH_WARMUP_QUERIES=1000
++ ZVEC_BENCH_WARMUP_QUERIES=1000
++ R=tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh
++ ROOT=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq
++ run_dataset cohere /data/cohere_medium_1m cohere-medium-1m-hnsw-bbq
++ local tag=cohere dataset=/data/cohere_medium_1m es_index=cohere-medium-1m-hnsw-bbq
++ export ZVEC_BENCH_DATASET=/data/cohere_medium_1m
++ ZVEC_BENCH_DATASET=/data/cohere_medium_1m
++ export ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
++ ZVEC_BENCH_ES_INDEX=cohere-medium-1m-hnsw-bbq
++ local base=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere
++ export ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
++ ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh build --overwrite
+ACTION=build
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=both
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ docker start zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines zvec --overwrite --zvec-total-bits 1 --zvec-num-clusters 16
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+
+FhtKacRotator is selected
+
+{
+  "build": {
+    "details": {
+      "build_threads": 8,
+      "ef_construction": 100,
+      "index_type": "HNSW_RABITQ",
+      "m": 16,
+      "metric": "COSINE",
+      "num_clusters": 16,
+      "path": "/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit/zvec",
+      "sample_count": 0,
+      "storage_scope": "entire Zvec collection directory",
+      "total_bits": 1
+    },
+    "dimension": 768,
+    "engine": "zvec",
+    "finalize_seconds": 293.4364128559828,
+    "index_bytes": 3396975904,
+    "ingest_seconds": 51.89523406140506,
+    "total_seconds": 345.3404054194689,
+    "vector_count": 1000000,
+    "vectors_per_second": 2895.6935948035
+  }
+}
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines elasticsearch --overwrite --es-url http://127.0.0.1:19200 --es-index cohere-medium-1m-hnsw-bbq
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+
+{
+  "build": {
+    "details": {
+      "bulk_client_threads": 8,
+      "bulk_queue_size": 4,
+      "ef_construction": 100,
+      "force_merged": true,
+      "index": "cohere-medium-1m-hnsw-bbq",
+      "index_type": "bbq_hnsw",
+      "m": 16,
+      "metric": "cosine",
+      "replicas": 0,
+      "segment_count": 1,
+      "server_threads": "controlled by Elasticsearch node CPU allocation",
+      "shards": 1,
+      "source_enabled": false,
+      "storage_scope": "primary shard store including retained raw vectors",
+      "store_stability_samples": 30,
+      "store_stabilization_included_in_total_seconds": false,
+      "store_stabilization_seconds": 29.1009083930403,
+      "version": "8.18.8"
+    },
+    "dimension": 768,
+    "engine": "elasticsearch",
+    "finalize_seconds": 516.3180757630616,
+    "index_bytes": 5066956657,
+    "ingest_seconds": 283.4628337342292,
+    "total_seconds": 799.8472042586654,
+    "vector_count": 1000000,
+    "vectors_per_second": 1250.2387889532542
+  }
+}
++ docker stop --timeout 30 zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=both
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ docker start zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 1 --zvec-num-clusters 16
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+zvec          threads= 1 ef=  32 qps=   6245.59 recall@10=0.7033
+zvec          threads= 1 ef=  64 qps=   4337.20 recall@10=0.7327
+zvec          threads= 1 ef= 128 qps=   2777.82 recall@10=0.7469
+zvec          threads= 1 ef= 256 qps=   1625.67 recall@10=0.7585
+zvec          threads= 1 ef= 512 qps=    919.92 recall@10=0.7635
+zvec          threads= 1 ef=1000 qps=    521.95 recall@10=0.7663
+zvec          threads= 4 ef=  32 qps=  21363.88 recall@10=0.7033
+zvec          threads= 4 ef=  64 qps=  16218.28 recall@10=0.7327
+zvec          threads= 4 ef= 128 qps=  10867.59 recall@10=0.7469
+zvec          threads= 4 ef= 256 qps=   6693.14 recall@10=0.7585
+zvec          threads= 4 ef= 512 qps=   3849.58 recall@10=0.7635
+zvec          threads= 4 ef=1000 qps=   2223.10 recall@10=0.7663
+zvec          threads= 8 ef=  32 qps=  23645.85 recall@10=0.7033
+zvec          threads= 8 ef=  64 qps=  22815.38 recall@10=0.7327
+zvec          threads= 8 ef= 128 qps=  19605.56 recall@10=0.7469
+zvec          threads= 8 ef= 256 qps=  12994.71 recall@10=0.7585
+zvec          threads= 8 ef= 512 qps=   7689.56 recall@10=0.7635
+zvec          threads= 8 ef=1000 qps=   4527.26 recall@10=0.7663
+zvec          threads=16 ef=  32 qps=  23576.90 recall@10=0.7033
+zvec          threads=16 ef=  64 qps=  22292.64 recall@10=0.7327
+zvec          threads=16 ef= 128 qps=  19498.93 recall@10=0.7469
+zvec          threads=16 ef= 256 qps=  13024.27 recall@10=0.7585
+zvec          threads=16 ef= 512 qps=   7732.26 recall@10=0.7635
+zvec          threads=16 ef=1000 qps=   4499.83 recall@10=0.7663
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines elasticsearch --es-url http://127.0.0.1:19200 --es-index cohere-medium-1m-hnsw-bbq --es-rescore-oversample none
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+elasticsearch threads= 1 num_candidates=  32 qps=    795.45 recall@10=0.6769
+elasticsearch threads= 1 num_candidates=  64 qps=    731.62 recall@10=0.7115
+elasticsearch threads= 1 num_candidates= 128 qps=    611.53 recall@10=0.7263
+elasticsearch threads= 1 num_candidates= 256 qps=    474.87 recall@10=0.7376
+elasticsearch threads= 1 num_candidates= 512 qps=    331.82 recall@10=0.7455
+elasticsearch threads= 1 num_candidates=1000 qps=    219.40 recall@10=0.7499
+elasticsearch threads= 4 num_candidates=  32 qps=   1449.22 recall@10=0.6769
+elasticsearch threads= 4 num_candidates=  64 qps=   1412.62 recall@10=0.7115
+elasticsearch threads= 4 num_candidates= 128 qps=   1343.65 recall@10=0.7263
+elasticsearch threads= 4 num_candidates= 256 qps=   1254.51 recall@10=0.7376
+elasticsearch threads= 4 num_candidates= 512 qps=   1050.04 recall@10=0.7455
+elasticsearch threads= 4 num_candidates=1000 qps=    813.95 recall@10=0.7499
+elasticsearch threads= 8 num_candidates=  32 qps=   1463.40 recall@10=0.6769
+elasticsearch threads= 8 num_candidates=  64 qps=   1463.38 recall@10=0.7115
+elasticsearch threads= 8 num_candidates= 128 qps=   1462.15 recall@10=0.7263
+elasticsearch threads= 8 num_candidates= 256 qps=   1439.99 recall@10=0.7376
+elasticsearch threads= 8 num_candidates= 512 qps=   1419.24 recall@10=0.7455
+elasticsearch threads= 8 num_candidates=1000 qps=   1313.08 recall@10=0.7499
+elasticsearch threads=16 num_candidates=  32 qps=   1495.82 recall@10=0.6769
+elasticsearch threads=16 num_candidates=  64 qps=   1487.42 recall@10=0.7115
+elasticsearch threads=16 num_candidates= 128 qps=   1486.43 recall@10=0.7263
+elasticsearch threads=16 num_candidates= 256 qps=   1482.18 recall@10=0.7376
+elasticsearch threads=16 num_candidates= 512 qps=   1471.90 recall@10=0.7455
+elasticsearch threads=16 num_candidates=1000 qps=   1446.19 recall@10=0.7499
++ docker stop --timeout 30 zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
++ echo GROUP_AD_DONE_cohere
+GROUP_AD_DONE_cohere
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines zvec --zvec-refine
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=1
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 1 --zvec-num-clusters 16 --zvec-refine
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+zvec          threads= 1 ef=  32 qps=   5326.14 recall@10=0.8604
+zvec          threads= 1 ef=  64 qps=   3624.80 recall@10=0.9181
+zvec          threads= 1 ef= 128 qps=   2179.07 recall@10=0.9495
+zvec          threads= 1 ef= 256 qps=   1242.94 recall@10=0.9708
+zvec          threads= 1 ef= 512 qps=    708.73 recall@10=0.9824
+zvec          threads= 1 ef=1000 qps=    403.33 recall@10=0.9890
+zvec          threads= 4 ef=  32 qps=  19459.05 recall@10=0.8604
+zvec          threads= 4 ef=  64 qps=  13824.01 recall@10=0.9181
+zvec          threads= 4 ef= 128 qps=   8684.50 recall@10=0.9495
+zvec          threads= 4 ef= 256 qps=   5051.96 recall@10=0.9708
+zvec          threads= 4 ef= 512 qps=   2893.81 recall@10=0.9824
+zvec          threads= 4 ef=1000 qps=   1630.91 recall@10=0.9890
+zvec          threads= 8 ef=  32 qps=  23853.10 recall@10=0.8604
+zvec          threads= 8 ef=  64 qps=  22281.54 recall@10=0.9181
+zvec          threads= 8 ef= 128 qps=  15864.27 recall@10=0.9495
+zvec          threads= 8 ef= 256 qps=   9653.01 recall@10=0.9708
+zvec          threads= 8 ef= 512 qps=   5643.17 recall@10=0.9824
+zvec          threads= 8 ef=1000 qps=   3202.09 recall@10=0.9890
+zvec          threads=16 ef=  32 qps=  23629.55 recall@10=0.8604
+zvec          threads=16 ef=  64 qps=  21792.73 recall@10=0.9181
+zvec          threads=16 ef= 128 qps=  15968.59 recall@10=0.9495
+zvec          threads=16 ef= 256 qps=   9726.84 recall@10=0.9708
+zvec          threads=16 ef= 512 qps=   5619.58 recall@10=0.9824
+zvec          threads=16 ef=1000 qps=   3161.81 recall@10=0.9890
++ echo GROUP_B_DONE_cohere
+GROUP_B_DONE_cohere
++ export ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit
++ ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh build --engines zvec --zvec-total-bits 7 --overwrite
+ACTION=build
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=7
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines zvec --overwrite --zvec-total-bits 7 --zvec-num-clusters 16
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+
+FhtKacRotator is selected
+
+{
+  "build": {
+    "details": {
+      "build_threads": 8,
+      "ef_construction": 100,
+      "index_type": "HNSW_RABITQ",
+      "m": 16,
+      "metric": "COSINE",
+      "num_clusters": 16,
+      "path": "/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit/zvec",
+      "sample_count": 0,
+      "storage_scope": "entire Zvec collection directory",
+      "total_bits": 7
+    },
+    "dimension": 768,
+    "engine": "zvec",
+    "finalize_seconds": 275.0073662213981,
+    "index_bytes": 4006219040,
+    "ingest_seconds": 51.79389256797731,
+    "total_seconds": 326.80922940932214,
+    "vector_count": 1000000,
+    "vectors_per_second": 3059.8891035219804
+  }
+}
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines zvec --zvec-total-bits 7
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=cohere-medium-1m-hnsw-bbq
+ZVEC_TOTAL_BITS=7
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/seven-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 7 --zvec-num-clusters 16
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+zvec          threads= 1 ef=  32 qps=   4407.69 recall@10=0.8717
+zvec          threads= 1 ef=  64 qps=   2920.78 recall@10=0.9247
+zvec          threads= 1 ef= 128 qps=   1743.77 recall@10=0.9481
+zvec          threads= 1 ef= 256 qps=    993.98 recall@10=0.9656
+zvec          threads= 1 ef= 512 qps=    550.40 recall@10=0.9748
+zvec          threads= 1 ef=1000 qps=    304.68 recall@10=0.9801
+zvec          threads= 4 ef=  32 qps=  16170.55 recall@10=0.8717
+zvec          threads= 4 ef=  64 qps=  11217.84 recall@10=0.9247
+zvec          threads= 4 ef= 128 qps=   6976.99 recall@10=0.9481
+zvec          threads= 4 ef= 256 qps=   4001.47 recall@10=0.9656
+zvec          threads= 4 ef= 512 qps=   2254.78 recall@10=0.9748
+zvec          threads= 4 ef=1000 qps=   1253.12 recall@10=0.9801
+zvec          threads= 8 ef=  32 qps=  23734.09 recall@10=0.8717
+zvec          threads= 8 ef=  64 qps=  19887.62 recall@10=0.9247
+zvec          threads= 8 ef= 128 qps=  13229.31 recall@10=0.9481
+zvec          threads= 8 ef= 256 qps=   7849.72 recall@10=0.9656
+zvec          threads= 8 ef= 512 qps=   4494.47 recall@10=0.9748
+zvec          threads= 8 ef=1000 qps=   2519.98 recall@10=0.9801
+zvec          threads=16 ef=  32 qps=  23169.77 recall@10=0.8717
+zvec          threads=16 ef=  64 qps=  19836.57 recall@10=0.9247
+zvec          threads=16 ef= 128 qps=  13228.25 recall@10=0.9481
+zvec          threads=16 ef= 256 qps=   7886.08 recall@10=0.9656
+zvec          threads=16 ef= 512 qps=   4471.63 recall@10=0.9748
+zvec          threads=16 ef=1000 qps=   2500.09 recall@10=0.9801
++ echo GROUP_C_DONE_cohere
+GROUP_C_DONE_cohere
++ echo DATASET_DONE_cohere
+DATASET_DONE_cohere
++ echo HNSW_COHERE_EXIT=0
+HNSW_COHERE_EXIT=0
++ run_dataset gist /tmp/gist-960-euclidean.hdf5 gist-960-hnsw-bbq
++ local tag=gist dataset=/tmp/gist-960-euclidean.hdf5 es_index=gist-960-hnsw-bbq
++ export ZVEC_BENCH_DATASET=/tmp/gist-960-euclidean.hdf5
++ ZVEC_BENCH_DATASET=/tmp/gist-960-euclidean.hdf5
++ export ZVEC_BENCH_ES_INDEX=gist-960-hnsw-bbq
++ ZVEC_BENCH_ES_INDEX=gist-960-hnsw-bbq
++ local base=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist
++ export ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit
++ ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh build --overwrite
+ACTION=build
+DATASET=/tmp/gist-960-euclidean.hdf5
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=both
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-960-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ docker start zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines zvec --overwrite --zvec-total-bits 1 --zvec-num-clusters 16
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+
+FhtKacRotator is selected
+
+{
+  "build": {
+    "details": {
+      "build_threads": 8,
+      "ef_construction": 100,
+      "index_type": "HNSW_RABITQ",
+      "m": 16,
+      "metric": "L2",
+      "num_clusters": 16,
+      "path": "/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit/zvec",
+      "sample_count": 0,
+      "storage_scope": "entire Zvec collection directory",
+      "total_bits": 1
+    },
+    "dimension": 960,
+    "engine": "zvec",
+    "finalize_seconds": 265.8330507837236,
+    "index_bytes": 4193038192,
+    "ingest_seconds": 51.23322362266481,
+    "total_seconds": 317.07399306073785,
+    "vector_count": 1000000,
+    "vectors_per_second": 3153.8379743697324
+  }
+}
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines elasticsearch --overwrite --es-url http://127.0.0.1:19200 --es-index gist-960-hnsw-bbq
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+
+{
+  "build": {
+    "details": {
+      "bulk_client_threads": 8,
+      "bulk_queue_size": 4,
+      "ef_construction": 100,
+      "force_merged": true,
+      "index": "gist-960-hnsw-bbq",
+      "index_type": "bbq_hnsw",
+      "m": 16,
+      "metric": "l2_norm",
+      "replicas": 0,
+      "segment_count": 1,
+      "server_threads": "controlled by Elasticsearch node CPU allocation",
+      "shards": 1,
+      "source_enabled": false,
+      "storage_scope": "primary shard store including retained raw vectors",
+      "store_stability_samples": 30,
+      "store_stabilization_included_in_total_seconds": false,
+      "store_stabilization_seconds": 29.075408276170492,
+      "version": "8.18.8"
+    },
+    "dimension": 960,
+    "engine": "elasticsearch",
+    "finalize_seconds": 637.3718441892415,
+    "index_bytes": 4791788193,
+    "ingest_seconds": 325.724069358781,
+    "total_seconds": 963.1648820023984,
+    "vector_count": 1000000,
+    "vectors_per_second": 1038.243834140861
+  }
+}
++ docker stop --timeout 30 zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search
+ACTION=search
+DATASET=/tmp/gist-960-euclidean.hdf5
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=both
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-960-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ docker start zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+curl: (56) Recv failure: Connection reset by peer
+Elasticsearch is ready: http://127.0.0.1:19200
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 1 --zvec-num-clusters 16
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+zvec          threads= 1 ef=  32 qps=   6424.57 recall@10=0.4616
+zvec          threads= 1 ef=  64 qps=   4483.08 recall@10=0.5217
+zvec          threads= 1 ef= 128 qps=   2880.26 recall@10=0.5581
+zvec          threads= 1 ef= 256 qps=   1714.45 recall@10=0.5779
+zvec          threads= 1 ef= 512 qps=   1002.14 recall@10=0.5930
+zvec          threads= 1 ef=1000 qps=    589.84 recall@10=0.5971
+zvec          threads= 4 ef=  32 qps=  22672.82 recall@10=0.4616
+zvec          threads= 4 ef=  64 qps=  17197.23 recall@10=0.5217
+zvec          threads= 4 ef= 128 qps=  11602.80 recall@10=0.5581
+zvec          threads= 4 ef= 256 qps=   7072.11 recall@10=0.5779
+zvec          threads= 4 ef= 512 qps=   4201.95 recall@10=0.5930
+zvec          threads= 4 ef=1000 qps=   2502.45 recall@10=0.5971
+zvec          threads= 8 ef=  32 qps=  23629.65 recall@10=0.4616
+zvec          threads= 8 ef=  64 qps=  22445.29 recall@10=0.5217
+zvec          threads= 8 ef= 128 qps=  20331.39 recall@10=0.5581
+zvec          threads= 8 ef= 256 qps=  13588.67 recall@10=0.5779
+zvec          threads= 8 ef= 512 qps=   8234.69 recall@10=0.5930
+zvec          threads= 8 ef=1000 qps=   5006.22 recall@10=0.5971
+zvec          threads=16 ef=  32 qps=  23763.53 recall@10=0.4616
+zvec          threads=16 ef=  64 qps=  22286.88 recall@10=0.5217
+zvec          threads=16 ef= 128 qps=  20117.16 recall@10=0.5581
+zvec          threads=16 ef= 256 qps=  13683.67 recall@10=0.5779
+zvec          threads=16 ef= 512 qps=   8296.55 recall@10=0.5930
+zvec          threads=16 ef=1000 qps=   4999.95 recall@10=0.5971
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines elasticsearch --es-url http://127.0.0.1:19200 --es-index gist-960-hnsw-bbq --es-rescore-oversample none
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+elasticsearch threads= 1 num_candidates=  32 qps=    761.79 recall@10=0.2363
+elasticsearch threads= 1 num_candidates=  64 qps=    675.76 recall@10=0.2646
+elasticsearch threads= 1 num_candidates= 128 qps=    539.47 recall@10=0.2879
+elasticsearch threads= 1 num_candidates= 256 qps=    407.72 recall@10=0.3045
+elasticsearch threads= 1 num_candidates= 512 qps=    280.89 recall@10=0.3136
+elasticsearch threads= 1 num_candidates=1000 qps=    187.27 recall@10=0.3208
+elasticsearch threads= 4 num_candidates=  32 qps=   1367.91 recall@10=0.2363
+elasticsearch threads= 4 num_candidates=  64 qps=   1328.35 recall@10=0.2646
+elasticsearch threads= 4 num_candidates= 128 qps=   1245.80 recall@10=0.2879
+elasticsearch threads= 4 num_candidates= 256 qps=   1125.91 recall@10=0.3045
+elasticsearch threads= 4 num_candidates= 512 qps=    929.39 recall@10=0.3136
+elasticsearch threads= 4 num_candidates=1000 qps=    711.34 recall@10=0.3208
+elasticsearch threads= 8 num_candidates=  32 qps=   1382.10 recall@10=0.2363
+elasticsearch threads= 8 num_candidates=  64 qps=   1380.75 recall@10=0.2646
+elasticsearch threads= 8 num_candidates= 128 qps=   1369.61 recall@10=0.2879
+elasticsearch threads= 8 num_candidates= 256 qps=   1356.87 recall@10=0.3045
+elasticsearch threads= 8 num_candidates= 512 qps=   1323.86 recall@10=0.3136
+elasticsearch threads= 8 num_candidates=1000 qps=   1149.94 recall@10=0.3208
+elasticsearch threads=16 num_candidates=  32 qps=   1386.98 recall@10=0.2363
+elasticsearch threads=16 num_candidates=  64 qps=   1391.72 recall@10=0.2646
+elasticsearch threads=16 num_candidates= 128 qps=   1389.45 recall@10=0.2879
+elasticsearch threads=16 num_candidates= 256 qps=   1386.00 recall@10=0.3045
+elasticsearch threads=16 num_candidates= 512 qps=   1378.85 recall@10=0.3136
+elasticsearch threads=16 num_candidates=1000 qps=   1286.90 recall@10=0.3208
++ docker stop --timeout 30 zvec-es-bbq-benchmark-8-18
+zvec-es-bbq-benchmark-8-18
++ echo GROUP_AD_DONE_gist
+GROUP_AD_DONE_gist
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines zvec --zvec-refine
+ACTION=search
+DATASET=/tmp/gist-960-euclidean.hdf5
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-960-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=1
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/one-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 1 --zvec-num-clusters 16 --zvec-refine
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+zvec          threads= 1 ef=  32 qps=   5199.45 recall@10=0.5721
+zvec          threads= 1 ef=  64 qps=   3444.10 recall@10=0.7051
+zvec          threads= 1 ef= 128 qps=   2060.80 recall@10=0.8073
+zvec          threads= 1 ef= 256 qps=   1191.50 recall@10=0.8826
+zvec          threads= 1 ef= 512 qps=    696.47 recall@10=0.9344
+zvec          threads= 1 ef=1000 qps=    398.55 recall@10=0.9626
+zvec          threads= 4 ef=  32 qps=  18801.57 recall@10=0.5721
+zvec          threads= 4 ef=  64 qps=  13158.44 recall@10=0.7051
+zvec          threads= 4 ef= 128 qps=   8174.37 recall@10=0.8073
+zvec          threads= 4 ef= 256 qps=   4796.10 recall@10=0.8826
+zvec          threads= 4 ef= 512 qps=   2818.41 recall@10=0.9344
+zvec          threads= 4 ef=1000 qps=   1622.94 recall@10=0.9626
+zvec          threads= 8 ef=  32 qps=  23497.06 recall@10=0.5721
+zvec          threads= 8 ef=  64 qps=  21684.55 recall@10=0.7051
+zvec          threads= 8 ef= 128 qps=  15252.10 recall@10=0.8073
+zvec          threads= 8 ef= 256 qps=   9313.50 recall@10=0.8826
+zvec          threads= 8 ef= 512 qps=   5517.07 recall@10=0.9344
+zvec          threads= 8 ef=1000 qps=   3189.86 recall@10=0.9626
+zvec          threads=16 ef=  32 qps=  23389.46 recall@10=0.5721
+zvec          threads=16 ef=  64 qps=  21150.37 recall@10=0.7051
+zvec          threads=16 ef= 128 qps=  15336.09 recall@10=0.8073
+zvec          threads=16 ef= 256 qps=   9322.46 recall@10=0.8826
+zvec          threads=16 ef= 512 qps=   5495.57 recall@10=0.9344
+zvec          threads=16 ef=1000 qps=   3149.30 recall@10=0.9626
++ echo GROUP_B_DONE_gist
+GROUP_B_DONE_gist
++ export ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit
++ ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh build --engines zvec --zvec-total-bits 7 --overwrite
+ACTION=build
+DATASET=/tmp/gist-960-euclidean.hdf5
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-960-hnsw-bbq
+ZVEC_TOTAL_BITS=7
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines zvec --overwrite --zvec-total-bits 7 --zvec-num-clusters 16
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+
+FhtKacRotator is selected
+
+{
+  "build": {
+    "details": {
+      "build_threads": 8,
+      "ef_construction": 100,
+      "index_type": "HNSW_RABITQ",
+      "m": 16,
+      "metric": "L2",
+      "num_clusters": 16,
+      "path": "/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit/zvec",
+      "sample_count": 0,
+      "storage_scope": "entire Zvec collection directory",
+      "total_bits": 7
+    },
+    "dimension": 960,
+    "engine": "zvec",
+    "finalize_seconds": 272.9913728069514,
+    "index_bytes": 4928360304,
+    "ingest_seconds": 51.23647303134203,
+    "total_seconds": 324.2354018948972,
+    "vector_count": 1000000,
+    "vectors_per_second": 3084.17894577766
+  }
+}
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines zvec --zvec-total-bits 7
+ACTION=search
+DATASET=/tmp/gist-960-euclidean.hdf5
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-960-hnsw-bbq
+ZVEC_TOTAL_BITS=7
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /tmp/gist-960-euclidean.hdf5 --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/gist/seven-bit --m 16 --ef-construction 100 --build-threads 8 --search-values 32\,64\,128\,256\,512\,1000 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 7 --zvec-num-clusters 16
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "ann-benchmarks-hdf5",
+    "dimension": 960,
+    "distance": "euclidean",
+    "file_size": 3844648288,
+    "groundtruth_k": 100,
+    "mtime_ns": 1785816686470551682,
+    "path": "/tmp/gist-960-euclidean.hdf5",
+    "query_count": 1000,
+    "sha256": "8e95831936bfdbfa0a56086942e2cf98cd703517c67f985914183eb4cdbf026a"
+  }
+}
+zvec          threads= 1 ef=  32 qps=   4035.72 recall@10=0.5924
+zvec          threads= 1 ef=  64 qps=   2611.41 recall@10=0.7156
+zvec          threads= 1 ef= 128 qps=   1571.89 recall@10=0.8120
+zvec          threads= 1 ef= 256 qps=    920.17 recall@10=0.8883
+zvec          threads= 1 ef= 512 qps=    530.70 recall@10=0.9307
+zvec          threads= 1 ef=1000 qps=    307.06 recall@10=0.9539
+zvec          threads= 4 ef=  32 qps=  14923.90 recall@10=0.5924
+zvec          threads= 4 ef=  64 qps=  10052.69 recall@10=0.7156
+zvec          threads= 4 ef= 128 qps=   6228.47 recall@10=0.8120
+zvec          threads= 4 ef= 256 qps=   3688.46 recall@10=0.8883
+zvec          threads= 4 ef= 512 qps=   2131.14 recall@10=0.9307
+zvec          threads= 4 ef=1000 qps=   1230.56 recall@10=0.9539
+zvec          threads= 8 ef=  32 qps=  22960.49 recall@10=0.5924
+zvec          threads= 8 ef=  64 qps=  17989.52 recall@10=0.7156
+zvec          threads= 8 ef= 128 qps=  11727.11 recall@10=0.8120
+zvec          threads= 8 ef= 256 qps=   7159.52 recall@10=0.8883
+zvec          threads= 8 ef= 512 qps=   4198.48 recall@10=0.9307
+zvec          threads= 8 ef=1000 qps=   2439.62 recall@10=0.9539
+zvec          threads=16 ef=  32 qps=  22331.81 recall@10=0.5924
+zvec          threads=16 ef=  64 qps=  18130.60 recall@10=0.7156
+zvec          threads=16 ef= 128 qps=  11835.85 recall@10=0.8120
+zvec          threads=16 ef= 256 qps=   7153.90 recall@10=0.8883
+zvec          threads=16 ef= 512 qps=   4173.59 recall@10=0.9307
+zvec          threads=16 ef=1000 qps=   2417.13 recall@10=0.9539
++ echo GROUP_C_DONE_gist
+GROUP_C_DONE_gist
++ echo DATASET_DONE_gist
+DATASET_DONE_gist
++ echo HNSW_GIST_EXIT=0
+HNSW_GIST_EXIT=0
++ echo HNSW_ALL_DONE
+HNSW_ALL_DONE

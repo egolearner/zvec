@@ -158,20 +158,38 @@ zvec 建库约为 ES 的 1/3（Cohere 345s vs 800s，GIST 317s vs 963s；ES 含 
 
 zvec 侧最优配置在所有目标 recall 上都是 **`zvec-1bit+refine`**（优于 `zvec-7bit`：同 recall 下 QPS 更高，且索引更小、复用同一份 1-bit 索引）。
 
-**Cohere**
+**Cohere**（ES 侧为所有 oversample 设置的**最优包络**，即每个目标 recall 上取表现最好的那组）
 
-| Recall@10 | 线程 | zvec QPS | ES QPS | ES 配置 | zvec/ES |
+| Recall@10 | 线程 | zvec QPS | ES QPS | ES 最优配置 | zvec/ES |
 |---:|---:|---:|---:|---|---:|
+| 0.80 | 1 | 6522 | 846 | ov1.5 | **7.7×** |
+| 0.80 | 4 | 22285 | 1478 | ov1.5 | **15.1×** |
+| 0.80 | 8 | 23299 | 1488 | ov1.5 | **15.7×** |
+| 0.80 | 16 | 23515 | 1507 | ov1.5 | **15.6×** |
+| 0.85 | 1 | 5565 | 819 | ov1.5 | **6.8×** |
+| 0.85 | 4 | 19939 | 1456 | ov1.5 | **13.7×** |
+| 0.85 | 8 | 23721 | 1485 | ov1.5 | **16.0×** |
+| 0.85 | 16 | 23539 | 1495 | ov1.5 | **15.7×** |
+| 0.90 | 1 | 4109 | 722 | ov1.25 | **5.7×** |
+| 0.90 | 4 | 15500 | 1414 | ov1.25 | **11.0×** |
+| 0.90 | 8 | 22825 | 1477 | ov1.25 | **15.5×** |
+| 0.90 | 16 | 22376 | 1491 | ov1.25 | **15.0×** |
 | 0.95 | 1 | 2161 | 474 | ov3 | **4.6×** |
-| 0.95 | 4 | 8576 | 1245 | ov2 | **6.9×** |
-| 0.95 | 8 | 15728 | 1448 | ov2 | **10.9×** |
+| 0.95 | 4 | 8576 | 1249 | ov1.75 | **6.9×** |
+| 0.95 | 8 | 15728 | 1450 | ov1.25 | **10.8×** |
 | 0.95 | 16 | 15830 | 1483 | ov2 | **10.7×** |
 | 0.98 | 1 | 801 | 168 | ov3 | **4.8×** |
-| 0.98 | 4 | 3252 | 636 | ov3 | **5.1×** |
-| 0.98 | 8 | 6326 | 1047 | ov2 | **6.0×** |
+| 0.98 | 4 | 3252 | 646 | ov1.25 | **5.0×** |
+| 0.98 | 8 | 6326 | 1080 | ov1.25 | **5.9×** |
 | 0.98 | 16 | 6327 | 1195 | ov5 | **5.3×** |
 
-Recall 0.90 处 ES 一侧为 `-`：ES-ov2 的最低点（`num_candidates=32`）recall 已是 0.902，目标落在实测区间之外，无法插值。
+zvec 侧所有档位的最优配置都是 `zvec-1bit+refine`。该表由 `hnsw_rabitq/cohere/iso_recall_cohere.py` 生成，其中 zvec 的 `ef=12/16/20/24` 点来自重建索引后的补测（见 4 节说明），`ef>=32` 沿用首轮索引。
+
+**ES 侧关键发现：低 oversample 才是 0.80–0.95 区间的最优解。** 首轮只跑了 oversample 2/3/5，导致 recall 0.90 一档无法插值（ov2 的最低点 `num_candidates=32` 已是 0.902）。补跑后可见：
+
+- 固定 `num_candidates` 时，**oversample 的取值对 recall 影响很小**，真正的跃变来自「是否开启精排」：`num_candidates=32` 上 no-rescore 0.677 → ov1.1 0.858 → ov2 0.902 → ov5（无该点）；oversample 从 1.1 加到 2.0 只换来 +0.044 recall，却损失 11% QPS。
+- 因此要压到 recall 0.80–0.86，正确做法是**开精排 + 调小 `num_candidates`**（受 `num_candidates >= ceil(topk*oversample)` 约束），而不是调小 oversample。本次补测了 `num_candidates=12/16/20/24`。
+- 0.80–0.90 区间 ES 的最优配置是 **ov1.25–1.5**，比首轮最低的 ov2 提升约 5–8% QPS；0.95 以上 ov1.25–3 互有胜负。
 
 **GIST**
 
@@ -198,13 +216,19 @@ Recall 0.90 处 ES 一侧为 `-`：ES-ov2 的最低点（`num_candidates=32`）r
 
 ```
 es-norescore       32:0.677/805  64:0.712/732  128:0.726/612  256:0.738/476  512:0.746/336  1000:0.750/220
+es-ov1.1           12:0.678/852  16:0.737/843  20:0.780/820  24:0.818/809  32:0.858/771  64:0.907/676  128:0.935/547  256:0.955/404  512:0.971/282  1000:0.979/177  2000:0.986/104
+es-ov1.25          32:0.868/807  64:0.912/693  128:0.938/555  256:0.959/398  512:0.973/263  1000:0.981/163  2000:0.987/94
+es-ov1.5           16:0.800/847  20:0.834/837  24:0.858/811  32:0.879/756  64:0.924/636  128:0.946/482  256:0.964/343  512:0.975/217  1000:0.982/134  2000:0.988/75
+es-ov1.75          32:0.892/727  64:0.929/606  128:0.951/448  256:0.966/310  512:0.976/195  1000:0.984/118  2000:0.989/67
 es-ov2             32:0.902/684  64:0.932/575  128:0.953/441  256:0.969/303  512:0.978/191  1000:0.985/115  2000:0.989/65
 es-ov3             32:0.924/658  64:0.946/513  128:0.964/363  256:0.975/238  512:0.982/144  1000:0.988/84   2000:0.991/47
 es-ov5             64:0.959/381  128:0.973/258 256:0.981/156  512:0.987/90   1000:0.990/52  2000:0.993/28
-zvec-1bit          32:0.703/6251 64:0.733/4393 128:0.747/2802 256:0.758/1633 512:0.763/926  1000:0.766/525
-zvec-1bit+refine   32:0.860/5361 64:0.918/3639 128:0.950/2189 256:0.971/1243 512:0.982/715  1000:0.989/404
+zvec-1bit          12:0.617/9012 16:0.646/8396 20:0.667/7803  24:0.678/7463  32:0.703/6251  64:0.733/4393  128:0.747/2802  256:0.758/1633  512:0.763/926  1000:0.766/525
+zvec-1bit+refine   12:0.660/7907 16:0.742/7293 20:0.790/6687  24:0.818/6245  32:0.860/5361  64:0.918/3639  128:0.950/2189  256:0.971/1243  512:0.982/715  1000:0.989/404
 zvec-7bit          32:0.872/4416 64:0.925/2922 128:0.948/1751 256:0.966/994  512:0.975/552  1000:0.980/305
 ```
+
+`num_candidates` / `ef` = 12–24 的点为补测（ES 见 3.4，zvec 见 4 节重建说明）。ES 与 zvec 的曲线现在都连续覆盖 recall 0.62–0.99，可在整个 0.80–0.95 区间做等 Recall 对比。
 
 **GIST**
 
@@ -247,6 +271,8 @@ zvec 从 1→8 线程接近线性（例如 Cohere `zvec-1bit+refine` ef=1000：4
 - 16 线程为 SMT 超订（物理核 8 个）。
 - RaBitQ-Library 三方对比未跑。
 - Cohere 的 IVF 组与 HNSW 组读取的是同一数据集的两种格式文件，未逐字节校验两者内容一致（各自 SHA-256 已记录）。
+- **Cohere 的 zvec `ef=12/16/20/24` 点跑在重建后的索引上**：首轮索引在补测前被外部进程删除（见下条），故用相同配置（`M=16`、`ef_construction=100`、`total_bits=1`、`num_clusters=16`、`build_threads=8`）重建后补测。`ef=32` 在两个索引上都测过，结果一致：recall 0.860 → 0.856（refine）/ 0.703 → 0.698（纯 1-bit），QPS 5361 → 5475（+2.1%）/ 6251 → 6671（+6.7%）。recall 差 ≤0.005 说明两份索引等价，QPS 的正偏差属于 run-to-run 波动与页缓存状态差异，等 Recall 表中 `ef>=32` 一律取首轮数值以避免偏向 zvec。
+- **结果目录曾被外部进程删除**：`~/benchmark-results/2026-08-11/` 在 23:45–00:41 之间被清空（本次 benchmark 工具链只会在 `--overwrite` 时删除 `search-results.jsonl`，不会删目录）。全部 JSONL / manifest / 报告已从 23:45 的快照 `2026-08-11-results.tgz` 完整恢复，仅 zvec 索引目录（可重建）丢失。此后每完成一轮补测都会刷新该快照。
 
 ---
 
@@ -254,9 +280,9 @@ zvec 从 1→8 线程接近线性（例如 Cohere `zvec-1bit+refine` ef=1000：4
 
 1. **IVF-RaBitQ 7-bit：zvec 全面领先 Faiss**，等 Recall QPS 为 Cohere 2.2–4.8×、GIST 2.1–3.7×，且索引小 6–24%。代价是构建慢 1.7–2.6×（瓶颈在 kmeans train，占 ~90%）。
 2. **IVF-RaBitQ 1-bit 是 zvec 的短板**：recall 天花板低于 Faiss（Cohere 0.805 vs 0.824、GIST 0.675 vs 0.682），逼近天花板时等 Recall 优势归零甚至反超（Cohere 0.80 处 0.59–0.99×）。中低 recall 区间仍有 1.0–3.9× 优势。
-3. **HNSW-RaBitQ：zvec 对 ES `bbq_hnsw` 优势显著**，等 Recall QPS 为 Cohere 4.6–10.9×（recall 0.95–0.98）、GIST 9.1–12.6×（recall 0.80–0.95），建库快 2.3–3.0×。索引大小：1-bit（最佳配置 refine 复用的就是这份）比 ES 小 33%（Cohere）/ 12%（GIST），但 GIST 的 7-bit 索引反而比 ES 大 3%。
+3. **HNSW-RaBitQ：zvec 对 ES `bbq_hnsw` 优势显著**，等 Recall QPS 为 Cohere 4.6–16.0×（recall 0.80–0.98 全区间，ES 取所有 oversample 的最优包络）、GIST 9.1–12.6×（recall 0.80–0.95），建库快 2.3–3.0×。索引大小：1-bit（最佳配置 refine 复用的就是这份）比 ES 小 33%（Cohere）/ 12%（GIST），但 GIST 的 7-bit 索引反而比 ES 大 3%。
 4. **zvec 最佳 HNSW 配置是 1-bit + 查询侧 refine**，在所有目标 recall 上都优于 7-bit，且能复用同一份 1-bit 索引。
-5. **ES 不精排不可用于高 recall 场景**：Cohere 天花板 0.750、GIST 仅 0.321；必须开 `rescore_vector`，而开启后 QPS 大幅下降。
+5. **ES 不精排不可用于高 recall 场景**：Cohere 天花板 0.750、GIST 仅 0.321，必须开 `rescore_vector`。而 **oversample 的具体取值影响很小**（`num_candidates=32` 上 1.1→2.0 只涨 0.044 recall、掉 11% QPS），recall 的跃变全部来自「是否开精排」；要落到 0.80–0.86 应当开精排并调小 `num_candidates`。0.80–0.90 区间 ES 的最优 oversample 是 **1.25–1.5**，比 2.0 快 5–8%。
 6. 高并发下差距被放大：zvec 到 8 线程接近线性扩展，**ES 在 4 线程后即进入平台期**。
 
 ---
@@ -273,14 +299,21 @@ ivf_rabitq/
   summary.txt / summarize_ivf.py              # 构建、同 nprobe 扫描、等 Recall 折算
   iso_recall.txt / iso_recall_ivf.py          # 固定 Recall 的 QPS 比值
 hnsw_rabitq/
-  cohere/one-bit/    search-results.jsonl (152 点: A 24 + B 24 + D 24 + ov2 28 + ov3 28 + ov5 24) + manifest.json
-  cohere/seven-bit/  search-results.jsonl (C 24 点) + manifest.json
-  gist/one-bit/      同上 152 点
-  gist/seven-bit/    同上 24 点
+  cohere/one-bit/       search-results.jsonl (292 点)
+                        # zvec: 1bit 24 + 1bit+refine 24
+                        # ES:   norescore 24 + ov1.1 44 + ov1.25 28 + ov1.5 40
+                        #       + ov1.75 28 + ov2 28 + ov3 28 + ov5 24
+                        manifest.json
+  cohere/one-bit-lowef/ search-results.jsonl (40 点: ef=12/16/20/24/32 × 1bit / refine × 4 线程)
+                        manifest.json        # 重建索引，见报告 4 节
+  cohere/seven-bit/     search-results.jsonl (C 24 点) + manifest.json
+  cohere/iso_recall_cohere.py / iso_recall_cohere.txt   # 3.4 节 Cohere 等 Recall 表
+  gist/one-bit/         search-results.jsonl (152 点)
+  gist/seven-bit/       search-results.jsonl (24 点)
   {cohere,gist}/summary.txt                   # summarize_results.py 输出
   {cohere,gist}/smoke/                        # smoke test 产物
-scripts/                                      # 三个复现脚本
-logs/                                         # 三份运行日志
+scripts/                                      # 复现脚本
+logs/                                         # 运行日志
 REPORT.md                                     # 本文件
 ```
 

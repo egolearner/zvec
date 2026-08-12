@@ -1,0 +1,185 @@
++ cd /home/jiliang.ljl/project/zvec
++ export PYTHONPATH=/tmp/zvec-pypath
++ PYTHONPATH=/tmp/zvec-pypath
++ export ZVEC_BENCH_PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
++ ZVEC_BENCH_PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
++ export ZVEC_BENCH_CPUS=0,2,4,6,8,10,12,14
++ ZVEC_BENCH_CPUS=0,2,4,6,8,10,12,14
++ export ZVEC_BENCH_BUILD_THREADS=8
++ ZVEC_BENCH_BUILD_THREADS=8
++ export ZVEC_BENCH_SEARCH_THREADS=1,4,8,16
++ ZVEC_BENCH_SEARCH_THREADS=1,4,8,16
++ export ZVEC_BENCH_SEARCH_VALUES=12,16,20,24,32
++ ZVEC_BENCH_SEARCH_VALUES=12,16,20,24,32
++ export ZVEC_BENCH_DURATION_SECONDS=10
++ ZVEC_BENCH_DURATION_SECONDS=10
++ export ZVEC_BENCH_REPEATS=3
++ ZVEC_BENCH_REPEATS=3
++ export ZVEC_BENCH_WARMUP_QUERIES=1000
++ ZVEC_BENCH_WARMUP_QUERIES=1000
++ export ZVEC_BENCH_DATASET=/data/cohere_medium_1m
++ ZVEC_BENCH_DATASET=/data/cohere_medium_1m
++ export ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef
++ ZVEC_BENCH_WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef
++ R=tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh build --engines zvec --overwrite
+ACTION=build
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef --m 16 --ef-construction 100 --build-threads 8 --search-values 12\,16\,20\,24\,32 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode build --engines zvec --overwrite --zvec-total-bits 1 --zvec-num-clusters 16
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+
+FhtKacRotator is selected
+
+{
+  "build": {
+    "details": {
+      "build_threads": 8,
+      "ef_construction": 100,
+      "index_type": "HNSW_RABITQ",
+      "m": 16,
+      "metric": "COSINE",
+      "num_clusters": 16,
+      "path": "/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef/zvec",
+      "sample_count": 0,
+      "storage_scope": "entire Zvec collection directory",
+      "total_bits": 1
+    },
+    "dimension": 768,
+    "engine": "zvec",
+    "finalize_seconds": 298.52232833765447,
+    "index_bytes": 3396975904,
+    "ingest_seconds": 52.30088188499212,
+    "total_seconds": 350.8309746682644,
+    "vector_count": 1000000,
+    "vectors_per_second": 2850.3754577131367
+  }
+}
++ echo LOWEF_BUILD_DONE
+LOWEF_BUILD_DONE
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines zvec
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=0
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef --m 16 --ef-construction 100 --build-threads 8 --search-values 12\,16\,20\,24\,32 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 1 --zvec-num-clusters 16
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+zvec          threads= 1 ef=  12 qps=   8937.11 recall@10=0.6174
+zvec          threads= 1 ef=  16 qps=   8361.89 recall@10=0.6462
+zvec          threads= 1 ef=  20 qps=   7731.24 recall@10=0.6666
+zvec          threads= 1 ef=  24 qps=   7419.25 recall@10=0.6783
+zvec          threads= 1 ef=  32 qps=   6656.19 recall@10=0.6979
+zvec          threads= 4 ef=  12 qps=  27323.72 recall@10=0.6174
+zvec          threads= 4 ef=  16 qps=  26634.76 recall@10=0.6462
+zvec          threads= 4 ef=  20 qps=  25730.16 recall@10=0.6666
+zvec          threads= 4 ef=  24 qps=  24802.93 recall@10=0.6783
+zvec          threads= 4 ef=  32 qps=  22663.05 recall@10=0.6979
+zvec          threads= 8 ef=  12 qps=  25246.43 recall@10=0.6174
+zvec          threads= 8 ef=  16 qps=  24781.08 recall@10=0.6462
+zvec          threads= 8 ef=  20 qps=  24727.15 recall@10=0.6666
+zvec          threads= 8 ef=  24 qps=  24619.02 recall@10=0.6783
+zvec          threads= 8 ef=  32 qps=  24017.46 recall@10=0.6979
+zvec          threads=16 ef=  12 qps=  25031.46 recall@10=0.6174
+zvec          threads=16 ef=  16 qps=  24811.30 recall@10=0.6462
+zvec          threads=16 ef=  20 qps=  24687.76 recall@10=0.6666
+zvec          threads=16 ef=  24 qps=  24640.19 recall@10=0.6783
+zvec          threads=16 ef=  32 qps=  24211.12 recall@10=0.6979
++ echo LOWEF_DONE_1bit
+LOWEF_DONE_1bit
++ bash tools/benchmark/hnsw_rabitq_vs_es/run_comparison.sh search --engines zvec --zvec-refine
+ACTION=search
+DATASET=/data/cohere_medium_1m
+WORK_DIR=/home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef
+BENCH_CPUS=0,2,4,6,8,10,12,14
+PYTHON=/home/jiliang.ljl/.conda/envs/venv/bin/python
+ENGINES=zvec
+ES_URL=http://127.0.0.1:19200
+ES_INDEX=gist-hnsw-bbq
+ZVEC_TOTAL_BITS=1
+ZVEC_REFINE=1
+ES_RESCORE_OVERSAMPLE=none
+ALLOW_DATASET_RELOCATION=0
++ taskset -c 0\,2\,4\,6\,8\,10\,12\,14 /home/jiliang.ljl/.conda/envs/venv/bin/python /home/jiliang.ljl/project/zvec/tools/benchmark/hnsw_rabitq_vs_es/benchmark.py --dataset /data/cohere_medium_1m --work-dir /home/jiliang.ljl/benchmark-results/2026-08-11/hnsw_rabitq/cohere/one-bit-lowef --m 16 --ef-construction 100 --build-threads 8 --search-values 12\,16\,20\,24\,32 --search-threads 1\,4\,8\,16 --duration-seconds 10 --repeats 3 --warmup-queries 1000 --mode search --engines zvec --zvec-total-bits 1 --zvec-num-clusters 16 --zvec-refine
+FhtKacRotator is selected
+{
+  "dataset": {
+    "base_count": 1000000,
+    "dataset_format": "cohere-parquet",
+    "dimension": 768,
+    "distance": "cosine",
+    "file_size": 3141255740,
+    "groundtruth_k": 1000,
+    "mtime_ns": 1786017921272628600,
+    "path": "/data/cohere_medium_1m",
+    "query_count": 1000,
+    "sha256": "4565da2063dd0966fa4ce7fd52fd5981b93bc72479bfb628bc1f7b4465e601d8"
+  }
+}
+zvec          threads= 1 ef=  12 qps=   7877.78 recall@10=0.6602
+zvec          threads= 1 ef=  16 qps=   7284.33 recall@10=0.7423
+zvec          threads= 1 ef=  20 qps=   6640.57 recall@10=0.7898
+zvec          threads= 1 ef=  24 qps=   6238.02 recall@10=0.8178
+zvec          threads= 1 ef=  32 qps=   5431.02 recall@10=0.8557
+zvec          threads= 4 ef=  12 qps=  25218.97 recall@10=0.6602
+zvec          threads= 4 ef=  16 qps=  23894.93 recall@10=0.7423
+zvec          threads= 4 ef=  20 qps=  22713.32 recall@10=0.7898
+zvec          threads= 4 ef=  24 qps=  21434.82 recall@10=0.8178
+zvec          threads= 4 ef=  32 qps=  19119.58 recall@10=0.8557
+zvec          threads= 8 ef=  12 qps=  24021.96 recall@10=0.6602
+zvec          threads= 8 ef=  16 qps=  23797.07 recall@10=0.7423
+zvec          threads= 8 ef=  20 qps=  23375.54 recall@10=0.7898
+zvec          threads= 8 ef=  24 qps=  23119.65 recall@10=0.8178
+zvec          threads= 8 ef=  32 qps=  22811.24 recall@10=0.8557
+zvec          threads=16 ef=  12 qps=  24017.15 recall@10=0.6602
+zvec          threads=16 ef=  16 qps=  23774.84 recall@10=0.7423
+zvec          threads=16 ef=  20 qps=  23600.50 recall@10=0.7898
+zvec          threads=16 ef=  24 qps=  23166.59 recall@10=0.8178
+zvec          threads=16 ef=  32 qps=  22924.98 recall@10=0.8557
++ echo LOWEF_DONE_refine
+LOWEF_DONE_refine
++ echo LOWEF_ALL_DONE
+LOWEF_ALL_DONE
