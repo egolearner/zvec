@@ -1,6 +1,7 @@
 /* Test-process-only Linux syscall interposition; never linked into zvec. */
 #define _GNU_SOURCE
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -121,3 +122,24 @@ SYNC_WRAPPER(fdatasync)
   }
 OPEN_WRAPPER(open)
 OPEN_WRAPPER(open64)
+
+/* Vector mmap storage grows its backing file before mapping new segments. */
+#define TRUNCATE_WRAPPER(name, offset_type)                         \
+  int name(int fd, offset_type length) {                            \
+    int (*real_fn)(int, offset_type) = dlsym(RTLD_NEXT, #name);       \
+    char path[PATH_MAX];                                            \
+    fd_path(fd, path);                                              \
+    if (inject("truncate", path)) return -1;                        \
+    int result = real_fn(fd, length);                               \
+    if (result < 0) record("ERROR", #name, path, errno);             \
+    return result;                                                 \
+  }
+TRUNCATE_WRAPPER(ftruncate, off_t)
+TRUNCATE_WRAPPER(ftruncate64, off64_t)
+
+int mkdir(const char *path, mode_t mode) {
+  int (*real_fn)(const char *, mode_t) = dlsym(RTLD_NEXT, "mkdir");
+  int result = real_fn(path, mode);
+  if (result < 0) record("ERROR", "mkdir", path, errno);
+  return result;
+}

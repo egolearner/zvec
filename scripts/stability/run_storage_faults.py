@@ -217,14 +217,18 @@ def fill(volume, kind):
     filler = volume.mountpoint / "filler"
     if kind == "blocks":
         with filler.open("wb", buffering=0) as stream:
-            block = bytes(1024 * 1024)
-            while True:
-                try:
-                    stream.write(block)
-                except OSError as error:
-                    if error.errno != errno.ENOSPC:
-                        raise
-                    break
+            # Reserve real blocks: buffered writes can leave delayed allocations,
+            # and an ENOSPC on a large request can still leave small extents free.
+            offset = 0
+            for size in (1024 * 1024, os.statvfs(volume.mountpoint).f_frsize):
+                while True:
+                    try:
+                        os.posix_fallocate(stream.fileno(), offset, size)
+                        offset += size
+                    except OSError as error:
+                        if error.errno != errno.ENOSPC:
+                            raise
+                        break
     else:
         filler.mkdir()
         for index in range(10000):
@@ -253,7 +257,10 @@ def io_points(operation, fts):
         ("manifest", "write", "/manifest.", 1),
     ]
     if operation == "optimize":
-        points += [("forward", "write", ".ipc", 2), ("vector", "write", ".proxima", 1)]
+        points += [
+            ("forward", "write", ".ipc", 2),
+            ("vector", "truncate", ".proxima", 1),
+        ]
         if fts:
             points.append(("fts", "write", "fts", 1))
     return points

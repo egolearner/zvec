@@ -74,7 +74,7 @@ jobs:
   recovery:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4

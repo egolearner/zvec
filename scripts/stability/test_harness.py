@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import os
 import signal
@@ -13,9 +14,40 @@ import types
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest import mock
 
 from run_recovery import discover_suites
-from run_storage_faults import Suite, choose_cuts, paused_worker, read_log, resume
+from run_storage_faults import Suite, choose_cuts, fill, paused_worker, read_log, resume
+
+
+class DiskFillTests(unittest.TestCase):
+    def test_large_allocation_failure_still_consumes_remaining_blocks(self):
+        remaining = 3 * 4096
+        allocations = []
+
+        def allocate(_fd, offset, length):
+            nonlocal remaining
+            if length > remaining:
+                raise OSError(errno.ENOSPC, "full")
+            remaining -= length
+            allocations.append((offset, length))
+
+        with tempfile.TemporaryDirectory() as directory:
+            volume = types.SimpleNamespace(mountpoint=Path(directory))
+            with (
+                mock.patch(
+                    "run_storage_faults.os.posix_fallocate",
+                    side_effect=allocate,
+                    create=True,
+                ),
+                mock.patch("pathlib.Path.open") as opened,
+            ):
+                opened.return_value.__enter__.return_value.write.side_effect = OSError(
+                    errno.ENOSPC, "full"
+                )
+                fill(volume, "blocks")
+        self.assertEqual(remaining, 0)
+        self.assertEqual(allocations, [(0, 4096), (4096, 4096), (8192, 4096)])
 
 
 class SuiteDiscoveryTests(unittest.TestCase):

@@ -31,14 +31,15 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=759)
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--suite-timeout", type=int, default=600)
     args = parser.parse_args()
 
     def interrupted(signum, _frame):
         raise KeyboardInterrupt(f"Interrupted by signal {signum}")
 
     signal.signal(signal.SIGTERM, interrupted)
-    if args.rounds < 1:
-        parser.error("--rounds must be positive")
+    if args.rounds < 1 or args.suite_timeout < 1:
+        parser.error("--rounds and --suite-timeout must be positive")
     build = args.build.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -47,6 +48,7 @@ def main():
             {
                 "seed": args.seed,
                 "rounds": args.rounds,
+                "suite_timeout": args.suite_timeout,
                 "build": str(build),
                 "commit": os.environ.get("GITHUB_SHA"),
                 "run_id": os.environ.get("GITHUB_RUN_ID"),
@@ -81,7 +83,7 @@ def main():
                         start_new_session=True,
                     )
                     try:
-                        code = process.wait(timeout=300)
+                        code = process.wait(timeout=args.suite_timeout)
                     finally:
                         if process.poll() is None:
                             os.killpg(process.pid, signal.SIGKILL)

@@ -51,6 +51,8 @@ with open(root + "/data/probe", "wb", buffering=0) as f:
         try:
             if operation == "write":
                 os.write(f.fileno(), b"data")
+            elif operation == "truncate":
+                os.ftruncate(f.fileno(), 4096)
             else:
                 os.fsync(f.fileno())
             outcomes.append(0)
@@ -94,6 +96,43 @@ with open(root + "/data/probe", "wb", buffering=0) as f:
         output, audit = self.probe("write", path_filter="/probe", after=2)
         self.assertEqual(output, str([0, errno.EIO]))
         self.assertEqual(audit.count("INJECT write"), 1)
+
+    def test_vector_file_expansion_failure_is_path_scoped(self):
+        for once, expected in ((False, [errno.EIO, errno.EIO]), (True, [errno.EIO, 0])):
+            output, audit = self.probe("truncate", once=once, path_filter="/probe")
+            self.assertEqual(output, str(expected))
+            self.assertIn("INJECT truncate", audit)
+        output, audit = self.probe("truncate", path_filter="/other")
+        self.assertEqual(output, "[0, 0]")
+        self.assertNotIn("INJECT", audit)
+
+    def test_failed_directory_creation_is_audited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = root / "existing"
+            existing.mkdir()
+            audit = root / "audit"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, sys; os.mkdir(sys.argv[1])",
+                    str(existing),
+                ],
+                check=False, env={
+                    **os.environ,
+                    "LD_PRELOAD": str(self.library),
+                    "ZVEC_FAULT_ROOT": str(root),
+                    "ZVEC_FAULT_AUDIT": str(audit),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                f"ERROR mkdir errno={errno.EEXIST} {existing}", audit.read_text()
+            )
 
     def test_no_fault_before_arming(self):
         output, audit = self.probe("write", armed=False)
