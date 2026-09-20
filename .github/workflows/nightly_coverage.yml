@@ -1,102 +1,148 @@
-name: Nightly Coverage Report
+name: Nightly Storage Stability
 
 on:
   schedule:
-    # Runs daily at 00:00 CST (China Standard Time) = 16:00 UTC
-    - cron: '0 16 * * *'
-
+    # Daily at 01:30 Asia/Shanghai, after the coverage job starts.
+    - cron: '30 17 * * *'
   workflow_dispatch:
+    inputs:
+      seed:
+        description: 'Reproduction seed (empty uses the workflow run ID)'
+        type: string
+        default: ''
+      cuts:
+        description: 'Power-loss replay cuts per workload'
+        type: number
+        default: 8
 
 permissions:
   contents: read
 
+concurrency:
+  group: nightly-stability-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  STABILITY_SEED: ${{ inputs.seed || github.run_id }}
+  STABILITY_CUTS: ${{ inputs.cuts || 8 }}
+
 jobs:
-  coverage:
-    name: Nightly Coverage Report
+  build:
     runs-on: ubuntu-24.04
-
-    strategy:
-      matrix:
-        python-version: ['3.10']
-      fail-fast: false
-
+    timeout-minutes: 60
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
-          ref: main # Always use main for nightly
           submodules: recursive
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-          cache-dependency-path: 'pyproject.toml'
-
-      - name: Set up environment variables
-        run: |
-          # Set number of processors for parallel builds
-          NPROC=$(nproc 2>/dev/null || echo 2)
-          echo "NPROC=$NPROC" >> $GITHUB_ENV
-          echo "Using $NPROC parallel jobs for builds"
-          
-          # Add Python user base bin to PATH for pip-installed CLI tools
-          echo "$(python -c 'import site; print(site.USER_BASE)')/bin" >> $GITHUB_PATH
-        shell: bash
-
-      - name: Install system dependencies
+          python-version: '3.12'
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: nightly-stability-linux-x64
+          max-size: 1G
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends lcov
-          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
-        shell: bash
-
-      - name: Install dependencies
+          sudo apt-get install -y build-essential libaio-dev
+          python -m pip install cmake==3.30.0 ninja==1.11.1
+      - name: Build stability executables
         run: |
-          python -m pip install --upgrade pip \
-            pybind11==3.0 \
-            cmake==3.30.0 \
-            ninja==1.11.1 \
-            pytest \
-            pytest-cov \
-            pytest-xdist \
-            scikit-build-core \
-            setuptools_scm
-        shell: bash
-
-      - name: Build with COVERAGE config
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PYTHON_BINDINGS=OFF -DBUILD_TOOLS=OFF
+          cmake --build build --parallel 4 --target \
+            crash_recovery_binaries storage_fault_worker
+          cc -shared -fPIC -O2 -Wall -Wextra -Werror \
+            scripts/stability/io_fault.c -ldl -o build/lib/libstorage_fault.so
+      - name: Check test harness
         run: |
-          cd "$GITHUB_WORKSPACE"
-          
-          CMAKE_GENERATOR="Unix Makefiles" \
-          CMAKE_BUILD_PARALLEL_LEVEL="$NPROC" \
-          python -m pip install -v . \
-            --no-build-isolation \
-            --config-settings="cmake.build-type=COVERAGE"
-        shell: bash
-
-      - name: Run Python Tests with Coverage
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          python -m pytest python/tests/ --cov=zvec --cov-report=xml \
-            --deselect=python/tests/test_gil_release.py::TestGILRelease::test_gil_released_during_query
-        shell: bash
-
-      - name: Run C++ Tests and Generate Coverage
-        run: |
-          cd "$GITHUB_WORKSPACE/build"
-          make unittest -j$NPROC
-          cd "$GITHUB_WORKSPACE"
-          # Ensure gcov.sh is executable
-          chmod +x scripts/gcov.sh
-          bash scripts/gcov.sh -k
-        shell: bash
-
-      - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v7
+          STORAGE_FAULT_LIBRARY="$PWD/build/lib/libstorage_fault.so" \
+            python -m unittest discover -s scripts/stability -p 'test_*.py' -v
+      - name: Bundle executables and libraries
+        run: tar -czf stability-build.tar.gz -C build bin lib recovery-suites.txt
+      - uses: actions/upload-artifact@v4
         with:
-          files: ./proxima-zvec-filtered.lcov.info,./coverage.xml
-          flags: python,cpp,nightly
-          name: nightly-linux-py${{ matrix.python-version }}
-          token: ${{ secrets.CODECOV_TOKEN }}
+          name: stability-build
+          path: stability-build.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  recovery:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: stability-build
+      - name: Unpack build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libaio1t64
+          mkdir build
+          tar -xzf stability-build.tar.gz -C build
+      - name: Repeat process-crash tests
+        run: |
+          python3 scripts/stability/run_recovery.py --build build \
+            --output artifacts/recovery --seed "$STABILITY_SEED" --rounds 3
+      - name: Save recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability-recovery-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 14
+          if-no-files-found: error
+
+  storage:
+    needs: build
+    # Optional JSON runner label/string, e.g. ["self-hosted", "Linux", "X64", "storage"].
+    # The runner must support loop mounts and (for power-loss) dm_log_writes.
+    runs-on: ${{ fromJSON(vars.STABILITY_RUNNER || '"ubuntu-24.04"') }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [disk-full, io-errors, power-loss]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: stability-build
+      - name: Prepare storage tools
+        run: |
+          mkdir build
+          tar -xzf stability-build.tar.gz -C build
+          sudo apt-get update
+          sudo apt-get install -y build-essential e2fsprogs util-linux kmod dmsetup git libaio1t64
+      - name: Build pinned block replay tool
+        if: matrix.mode == 'power-loss'
+        run: |
+          git init "$RUNNER_TEMP/log-writes"
+          git -C "$RUNNER_TEMP/log-writes" remote add origin https://github.com/josefbacik/log-writes.git
+          git -C "$RUNNER_TEMP/log-writes" fetch --depth 1 origin 7b70d8a6863c5de30933d42a7672d35d01d2dc6c
+          git -C "$RUNNER_TEMP/log-writes" checkout --detach FETCH_HEAD
+          make -C "$RUNNER_TEMP/log-writes" replay-log
+      - name: Run storage faults
+        env:
+          FAULT_MODE: ${{ matrix.mode }}
+        run: |
+          python3 scripts/stability/run_storage_faults.py \
+            --mode "$FAULT_MODE" --worker build/bin/storage_fault_worker \
+            --injector build/lib/libstorage_fault.so \
+            --replay-log "$RUNNER_TEMP/log-writes/replay-log" \
+            --output "artifacts/$FAULT_MODE" --seed "$STABILITY_SEED" --cuts "$STABILITY_CUTS"
+      - name: Save storage evidence and failed disk images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability-${{ matrix.mode }}-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          compression-level: 6
+          if-no-files-found: error
