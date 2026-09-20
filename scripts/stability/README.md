@@ -83,13 +83,13 @@ the failed operation before the parent observes it.
 ## Fault model limits
 
 - ENOSPC uses real filesystem exhaustion, not a mocked return value. The preload
-  library audits ENOSPC returned from covered database open/write/sync/truncate/mkdir calls.
-- EIO interception covers `write`, `pwrite`, `pwrite64`, `fsync`, `fdatasync`, `ftruncate`, and `ftruncate64`
+  library audits ENOSPC returned from covered database open/write/sync/mkdir calls.
+- EIO interception covers `write`, `pwrite`, `pwrite64`, `fsync`, `fdatasync`, and `msync`
   in this test process and only paths below the collection directory. File filters
-  select later stages; the vector case targets backing-file expansion before mmap,
-  not mmap writeback. Delayed injection requires a successful write before the
+  select later stages; the vector case resolves the mapped file through `/proc/self/maps`
+  and targets its `msync` request. Delayed injection requires a successful write before the
   fault. `fault.json` and the audit log identify the selected operation and path. It does not
-  cover mmap writeback, direct syscalls bypassing libc, rename/unlink, or hardware
+  cover asynchronous mmap writeback errors, direct syscalls bypassing libc, rename/unlink, or hardware
   device failures. The library is not linked into production targets.
 - Power loss uses Linux `dm-log-writes` and the pinned upstream `replay-log` tool.
   Every cut starts from the same clean baseline; normal filesystem recovery runs

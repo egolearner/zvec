@@ -259,7 +259,7 @@ def io_points(operation, fts):
     if operation == "optimize":
         points += [
             ("forward", "write", ".ipc", 2),
-            ("vector", "truncate", ".proxima", 1),
+            ("vector", "msync", ".proxima", 1),
         ]
         if fts:
             points.append(("fts", "write", "fts", 1))

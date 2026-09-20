@@ -2,6 +2,8 @@
 #define _GNU_SOURCE
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <stdint.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -123,19 +125,38 @@ SYNC_WRAPPER(fdatasync)
 OPEN_WRAPPER(open)
 OPEN_WRAPPER(open64)
 
-/* Vector mmap storage grows its backing file before mapping new segments. */
-#define TRUNCATE_WRAPPER(name, offset_type)                         \
-  int name(int fd, offset_type length) {                            \
-    int (*real_fn)(int, offset_type) = dlsym(RTLD_NEXT, #name);       \
-    char path[PATH_MAX];                                            \
-    fd_path(fd, path);                                              \
-    if (inject("truncate", path)) return -1;                        \
-    int result = real_fn(fd, length);                               \
-    if (result < 0) record("ERROR", #name, path, errno);             \
-    return result;                                                 \
+/* Resolve the file for an mmap flush without changing mapping lifetimes. */
+int msync(void *address, size_t length, int flags) {
+  int (*real_fn)(void *, size_t, int) = dlsym(RTLD_NEXT, "msync");
+  char path[PATH_MAX] = "";
+  if (operation && strcmp(operation, "msync") == 0 && arm &&
+      access(arm, F_OK) == 0) {
+    int saved = errno;
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) _exit(125);
+    char line[PATH_MAX + 256];
+    while (fgets(line, sizeof(line), maps)) {
+      unsigned long begin, end;
+      int offset = 0;
+      if (sscanf(line, "%lx-%lx %*s %*s %*s %*s %n", &begin, &end,
+                 &offset) == 2 && offset > 0 &&
+          (uintptr_t)address >= begin && (uintptr_t)address < end) {
+        size_t size = strcspn(line + offset, "\n");
+        if (size >= sizeof(path)) _exit(125);
+        memcpy(path, line + offset, size);
+        path[size] = '\0';
+        break;
+      }
+    }
+    if (ferror(maps)) _exit(125);
+    fclose(maps);
+    errno = saved;
+    if (inject("msync", path)) return -1;
   }
-TRUNCATE_WRAPPER(ftruncate, off_t)
-TRUNCATE_WRAPPER(ftruncate64, off64_t)
+  int result = real_fn(address, length, flags);
+  if (result < 0) record("ERROR", "msync", path, errno);
+  return result;
+}
 
 int mkdir(const char *path, mode_t mode) {
   int (*real_fn)(const char *, mode_t) = dlsym(RTLD_NEXT, "mkdir");

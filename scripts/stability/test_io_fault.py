@@ -39,20 +39,24 @@ class IoFaultTests(unittest.TestCase):
             }
             if once:
                 env["ZVEC_FAULT_ONCE"] = "1"
-            code = """import errno, os, sys
+            code = """import errno, mmap, os, sys
 root, operation = sys.argv[1:]
 # Neither paths outside the database nor unarmed operations may be faulted.
 with open(root + "/outside", "wb", buffering=0) as f:
     os.write(f.fileno(), b"outside")
     os.fsync(f.fileno())
-with open(root + "/data/probe", "wb", buffering=0) as f:
+with open(root + "/data/probe", "w+b", buffering=0) as f:
+    if operation == "msync":
+        os.ftruncate(f.fileno(), 4096)
+        mapping = mmap.mmap(f.fileno(), 4096)
+        mapping[0] = 1
     outcomes = []
     for _ in range(2):
         try:
             if operation == "write":
                 os.write(f.fileno(), b"data")
-            elif operation == "truncate":
-                os.ftruncate(f.fileno(), 4096)
+            elif operation == "msync":
+                mapping.flush()
             else:
                 os.fsync(f.fileno())
             outcomes.append(0)
@@ -97,12 +101,12 @@ with open(root + "/data/probe", "wb", buffering=0) as f:
         self.assertEqual(output, str([0, errno.EIO]))
         self.assertEqual(audit.count("INJECT write"), 1)
 
-    def test_vector_file_expansion_failure_is_path_scoped(self):
+    def test_vector_mmap_flush_failure_is_path_scoped(self):
         for once, expected in ((False, [errno.EIO, errno.EIO]), (True, [errno.EIO, 0])):
-            output, audit = self.probe("truncate", once=once, path_filter="/probe")
+            output, audit = self.probe("msync", once=once, path_filter="/probe")
             self.assertEqual(output, str(expected))
-            self.assertIn("INJECT truncate", audit)
-        output, audit = self.probe("truncate", path_filter="/other")
+            self.assertIn("INJECT msync", audit)
+        output, audit = self.probe("msync", path_filter="/other")
         self.assertEqual(output, "[0, 0]")
         self.assertNotIn("INJECT", audit)
 
@@ -119,7 +123,8 @@ with open(root + "/data/probe", "wb", buffering=0) as f:
                     "import os, sys; os.mkdir(sys.argv[1])",
                     str(existing),
                 ],
-                check=False, env={
+                check=False,
+                env={
                     **os.environ,
                     "LD_PRELOAD": str(self.library),
                     "ZVEC_FAULT_ROOT": str(root),
