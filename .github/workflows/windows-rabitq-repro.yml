@@ -1,4 +1,4 @@
-name: Windows RaBitQ Reproduction
+name: Windows C++ Failure Reproduction
 
 on:
   push:
@@ -11,11 +11,7 @@ permissions:
 
 jobs:
   reproduce:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2022, windows-2025]
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,10 +31,10 @@ jobs:
         shell: pwsh
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TOOLS=OFF -DENABLE_WERROR=ON
 
-      - name: Build focused test
+      - name: Build focused tests
         shell: pwsh
-        run: cmake --build build --target hnsw_rabitq_streamer_test --parallel 4
+        run: cmake --build build --target collection_test segment_helper_test --parallel 4
 
-      - name: Run focused test
+      - name: Run focused tests
         shell: pwsh
-        run: ctest --test-dir build -R '^hnsw_rabitq_streamer_test$' --output-on-failure
+        run: ctest --test-dir build -R '^(collection_test|segment_helper_test)$' --output-on-failure
