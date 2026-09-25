@@ -59,6 +59,60 @@ void HnswRabitqStreamerTest::TearDown() {
   ailego::FileHelper::RemovePath(dir_.c_str());
 }
 
+TEST_F(HnswRabitqStreamerTest, TestConvertSingleVector) {
+  auto holder =
+      make_shared<MultiPassIndexProvider<IndexMeta::DataType::DT_FP32>>(dim);
+  for (size_t i = 0; i < 100; ++i) {
+    NumericalVector<float> vec(dim, static_cast<float>(i));
+    ASSERT_TRUE(holder->emplace(i, vec));
+  }
+
+  RabitqConverter converter;
+  ASSERT_EQ(0, converter.init(*index_meta_ptr_, ailego::Params()));
+  ASSERT_EQ(0, converter.train(holder));
+  std::shared_ptr<IndexReformer> index_reformer;
+  ASSERT_EQ(0, converter.to_reformer(&index_reformer));
+  auto reformer = std::dynamic_pointer_cast<RabitqReformer>(index_reformer);
+  ASSERT_NE(nullptr, reformer);
+
+  NumericalVector<float> vec(dim, 1.0f);
+  IndexQueryMeta query_meta(IndexMeta::DataType::DT_FP32, dim);
+  IndexQueryMeta converted_meta;
+  std::string converted_vector;
+  ASSERT_EQ(0, reformer->convert(vec.data(), query_meta, &converted_vector,
+                                 &converted_meta));
+  ASSERT_FALSE(converted_vector.empty());
+}
+
+TEST_F(HnswRabitqStreamerTest, TestOpenEmptyIndex) {
+  auto holder =
+      make_shared<MultiPassIndexProvider<IndexMeta::DataType::DT_FP32>>(dim);
+  for (size_t i = 0; i < 100; ++i) {
+    NumericalVector<float> vec(dim, static_cast<float>(i));
+    ASSERT_TRUE(holder->emplace(i, vec));
+  }
+
+  RabitqConverter converter;
+  ASSERT_EQ(0, converter.init(*index_meta_ptr_, ailego::Params()));
+  ASSERT_EQ(0, converter.train(holder));
+  std::shared_ptr<IndexReformer> index_reformer;
+  ASSERT_EQ(0, converter.to_reformer(&index_reformer));
+  auto reformer = std::dynamic_pointer_cast<RabitqReformer>(index_reformer);
+  ASSERT_NE(nullptr, reformer);
+
+  auto streamer = std::make_shared<HnswRabitqStreamer>(holder, reformer);
+  ailego::Params params;
+  params.set("proxima.hnsw_rabitq.general.dimension", dim);
+  ASSERT_EQ(0, streamer->init(*index_meta_ptr_, params));
+
+  auto storage = IndexFactory::CreateStorage("MMapFileStorage");
+  ASSERT_NE(nullptr, storage);
+  ASSERT_EQ(0, storage->init(ailego::Params()));
+  ASSERT_EQ(0, storage->open(dir_ + "/TestOpenEmptyIndex", true));
+  ASSERT_EQ(0, streamer->open(storage));
+  ASSERT_EQ(0, streamer->close());
+}
+
 TEST_F(HnswRabitqStreamerTest, TestBuildAndSearch) {
   auto holder =
       make_shared<MultiPassIndexProvider<IndexMeta::DataType::DT_FP32>>(dim);
