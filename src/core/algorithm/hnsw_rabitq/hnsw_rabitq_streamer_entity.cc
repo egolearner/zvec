@@ -495,8 +495,6 @@ int HnswRabitqStreamerEntity::add_vector(level_t level, key_t key,
   size_t chunk_offset = -1UL;
 
   std::lock_guard<std::mutex> lock(mutex_);
-  LOG_ERROR("[DEBUG-780] key=%zu entity entry level=%zu", (size_t)key,
-            (size_t)level);
   // duplicate check
   if (ailego_unlikely(filter_same_key_ && get_id(key) != kInvalidNodeId)) {
     LOG_WARN("Try to add duplicate key, ignore it");
@@ -526,35 +524,29 @@ int HnswRabitqStreamerEntity::add_vector(level_t level, key_t key,
     node_chunk = node_chunks_[chunk_index];
     chunk_offset = node_chunk->data_size();
   }
-  LOG_ERROR("[DEBUG-780] key=%zu chunk selected offset=%zu", (size_t)key,
-            chunk_offset);
 
   size_t size = node_chunk->write(chunk_offset, vec, vector_size());
   if (ailego_unlikely(size != vector_size())) {
     LOG_ERROR("Chunk write vec failed, ret=%zu", size);
     return IndexError_WriteData;
   }
-  LOG_ERROR("[DEBUG-780] key=%zu vector bytes written", (size_t)key);
   size = node_chunk->write(chunk_offset + vector_size(), &key, sizeof(key_t));
   if (ailego_unlikely(size != sizeof(key_t))) {
     LOG_ERROR("Chunk write vec failed, ret=%zu", size);
     return IndexError_WriteData;
   }
-  LOG_ERROR("[DEBUG-780] key=%zu key bytes written", (size_t)key);
   //! level 0 neighbors is inited to zero by default
 
   int ret = add_upper_neighbor(level, local_id);
   if (ret != 0) {
     return ret;
   }
-  LOG_ERROR("[DEBUG-780] key=%zu upper neighbor added", (size_t)key);
 
   chunk_offset += node_size();
   if (ailego_unlikely(node_chunk->resize(chunk_offset) != chunk_offset)) {
     LOG_ERROR("Chunk resize to %zu failed", chunk_offset);
     return IndexError_Runtime;
   }
-  LOG_ERROR("[DEBUG-780] key=%zu chunk resized", (size_t)key);
   if (filter_same_key_ || get_vector_enabled_) {
     if (use_key_info_map_) {
       keys_map_lock_->lock();
