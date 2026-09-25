@@ -699,6 +699,7 @@ int HnswRabitqStreamer::add_impl(uint64_t pkey, const void *query,
 
   level_t level = alg_->get_random_level();
   node_id_t id;
+  LOG_ERROR("[DEBUG-780] pkey=%zu level=%zu", (size_t)pkey, (size_t)level);
   ret = entity_.add_vector(level, pkey, converted_vector.data(), &id);
   if (ailego_unlikely(ret != 0)) {
     LOG_ERROR("Hnsw streamer add vector failed");
