@@ -670,13 +670,13 @@ int HnswRabitqStreamer::add_impl(uint64_t pkey, const void *query,
   }
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
-  LOG_ERROR("[DEBUG-780] add_impl context begin");
+  LOG_ERROR("[DEBUG-780] pkey=%zu context begin", (size_t)pkey);
   ctx->clear();
   ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
   ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_.doc_cnt());
   ctx->set_provider(provider_);
-  LOG_ERROR("[DEBUG-780] add_impl context ready");
+  LOG_ERROR("[DEBUG-780] pkey=%zu context ready", (size_t)pkey);
 
   if (metric_->support_train()) {
     const std::lock_guard<std::mutex> lk(mutex_);
@@ -695,7 +695,7 @@ int HnswRabitqStreamer::add_impl(uint64_t pkey, const void *query,
     LOG_ERROR("Rabitq hnsw convert failed, ret=%d", ret);
     return ret;
   }
-  LOG_ERROR("[DEBUG-780] add_impl converted");
+  LOG_ERROR("[DEBUG-780] pkey=%zu converted", (size_t)pkey);
 
   level_t level = alg_->get_random_level();
   node_id_t id;
@@ -705,7 +705,7 @@ int HnswRabitqStreamer::add_impl(uint64_t pkey, const void *query,
     (*stats_.mutable_discarded_count())++;
     return ret;
   }
-  LOG_ERROR("[DEBUG-780] add_impl vector stored");
+  LOG_ERROR("[DEBUG-780] pkey=%zu vector stored", (size_t)pkey);
 
   ret = alg_->add_node(id, level, ctx);
   if (ailego_unlikely(ret != 0)) {
@@ -713,7 +713,7 @@ int HnswRabitqStreamer::add_impl(uint64_t pkey, const void *query,
     (*stats_.mutable_discarded_count())++;
     return ret;
   }
-  LOG_ERROR("[DEBUG-780] add_impl node linked");
+  LOG_ERROR("[DEBUG-780] pkey=%zu node linked", (size_t)pkey);
 
   if (ailego_unlikely(ctx->error())) {
     (*stats_.mutable_discarded_count())++;
