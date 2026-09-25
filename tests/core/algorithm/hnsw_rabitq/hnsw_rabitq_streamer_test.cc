@@ -114,6 +114,40 @@ TEST_F(HnswRabitqStreamerTest, TestOpenEmptyIndex) {
   ASSERT_EQ(0, streamer->close());
 }
 
+TEST_F(HnswRabitqStreamerTest, TestAddSingleVector) {
+  auto holder =
+      make_shared<MultiPassIndexProvider<IndexMeta::DataType::DT_FP32>>(dim);
+  for (size_t i = 0; i < 100; ++i) {
+    NumericalVector<float> vec(dim, static_cast<float>(i));
+    ASSERT_TRUE(holder->emplace(i, vec));
+  }
+
+  RabitqConverter converter;
+  ASSERT_EQ(0, converter.init(*index_meta_ptr_, ailego::Params()));
+  ASSERT_EQ(0, converter.train(holder));
+  std::shared_ptr<IndexReformer> index_reformer;
+  ASSERT_EQ(0, converter.to_reformer(&index_reformer));
+  auto reformer = std::dynamic_pointer_cast<RabitqReformer>(index_reformer);
+  ASSERT_NE(nullptr, reformer);
+
+  IndexStreamer::Pointer streamer =
+      std::make_shared<HnswRabitqStreamer>(holder, reformer);
+  ailego::Params params;
+  params.set("proxima.hnsw_rabitq.general.dimension", dim);
+  ASSERT_EQ(0, streamer->init(*index_meta_ptr_, params));
+
+  auto storage = IndexFactory::CreateStorage("MMapFileStorage");
+  ASSERT_NE(nullptr, storage);
+  ASSERT_EQ(0, storage->init(ailego::Params()));
+  ASSERT_EQ(0, storage->open(dir_ + "/TestAddSingleVector", true));
+  ASSERT_EQ(0, streamer->open(storage));
+
+  auto context = streamer->create_context();
+  NumericalVector<float> vec(dim, 0.0f);
+  IndexQueryMeta query_meta(IndexMeta::DataType::DT_FP32, dim);
+  ASSERT_EQ(0, streamer->add_impl(0, vec.data(), query_meta, context));
+}
+
 TEST_F(HnswRabitqStreamerTest, TestBuildAndSearch) {
   auto holder =
       make_shared<MultiPassIndexProvider<IndexMeta::DataType::DT_FP32>>(dim);
