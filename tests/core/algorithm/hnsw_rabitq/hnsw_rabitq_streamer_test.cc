@@ -114,7 +114,7 @@ TEST_F(HnswRabitqStreamerTest, TestOpenEmptyIndex) {
   ASSERT_EQ(0, streamer->close());
 }
 
-TEST_F(HnswRabitqStreamerTest, TestAddSingleVector) {
+TEST_F(HnswRabitqStreamerTest, TestAddTwoVectors) {
   auto holder =
       make_shared<MultiPassIndexProvider<IndexMeta::DataType::DT_FP32>>(dim);
   for (size_t i = 0; i < 100; ++i) {
@@ -139,13 +139,15 @@ TEST_F(HnswRabitqStreamerTest, TestAddSingleVector) {
   auto storage = IndexFactory::CreateStorage("MMapFileStorage");
   ASSERT_NE(nullptr, storage);
   ASSERT_EQ(0, storage->init(ailego::Params()));
-  ASSERT_EQ(0, storage->open(dir_ + "/TestAddSingleVector", true));
+  ASSERT_EQ(0, storage->open(dir_ + "/TestAddTwoVectors", true));
   ASSERT_EQ(0, streamer->open(storage));
 
   auto context = streamer->create_context();
   NumericalVector<float> vec(dim, 0.0f);
   IndexQueryMeta query_meta(IndexMeta::DataType::DT_FP32, dim);
   ASSERT_EQ(0, streamer->add_impl(0, vec.data(), query_meta, context));
+  NumericalVector<float> second_vec(dim, 1.0f);
+  ASSERT_EQ(0, streamer->add_impl(1, second_vec.data(), query_meta, context));
 }
 
 TEST_F(HnswRabitqStreamerTest, TestBuildAndSearch) {

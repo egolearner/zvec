@@ -38,5 +38,5 @@ jobs:
       - name: Run focused test
         shell: pwsh
         run: |
-          $env:GTEST_FILTER = 'HnswRabitqStreamerTest.TestConvertSingleVector:HnswRabitqStreamerTest.TestOpenEmptyIndex:HnswRabitqStreamerTest.TestAddSingleVector'
+          $env:GTEST_FILTER = 'HnswRabitqStreamerTest.TestAddTwoVectors'
           ctest --test-dir build -R '^hnsw_rabitq_streamer_test$' --output-on-failure
