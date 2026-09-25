@@ -339,10 +339,13 @@ class HnswRabitqStreamerEntity : public HnswRabitqEntity {
     if (level == 0) {
       return 0;
     }
+    LOG_ERROR("[DEBUG-780] upper id=%zu enter level=%zu", (size_t)id,
+              (size_t)level);
     // Exclusive lock: protects upper_neighbor_chunks_.emplace_back() and
     // upper_neighbor_index_->insert() from racing with concurrent find()
     // calls in get_upper_neighbor_chunk_loc().
     std::unique_lock<std::shared_mutex> lk(*upper_neighbor_rw_mutex_);
+    LOG_ERROR("[DEBUG-780] upper id=%zu lock acquired", (size_t)id);
     Chunk::Pointer chunk;
     uint64_t chunk_offset = -1UL;
     size_t neighbors_size = get_total_upper_neighbors_size(level);
@@ -359,6 +362,8 @@ class HnswRabitqStreamerEntity : public HnswRabitqEntity {
       auto p =
           broker_->alloc_chunk(HnswRabitqChunkBroker::CHUNK_TYPE_UPPER_NEIGHBOR,
                                chunk_index, upper_neighbor_chunk_size_);
+      LOG_ERROR("[DEBUG-780] upper id=%zu chunk allocated ret=%d", (size_t)id,
+                p.first);
       if (ailego_unlikely(p.first != 0)) {
         LOG_ERROR("Alloc data chunk failed");
         return p.first;
@@ -366,6 +371,7 @@ class HnswRabitqStreamerEntity : public HnswRabitqEntity {
       chunk = p.second;
       chunk_offset = 0UL;
       upper_neighbor_chunks_.emplace_back(chunk);
+      LOG_ERROR("[DEBUG-780] upper id=%zu chunk registered", (size_t)id);
     } else {
       chunk = upper_neighbor_chunks_[chunk_index];
       chunk_offset = chunk->data_size();
@@ -401,6 +407,7 @@ class HnswRabitqStreamerEntity : public HnswRabitqEntity {
       LOG_ERROR("Chunk resize to %zu failed", (size_t)chunk_offset);
       return IndexError_Runtime;
     }
+    LOG_ERROR("[DEBUG-780] upper id=%zu chunk resized", (size_t)id);
 
     // Use std::vector instead of a VLA: VLAs are a GNU extension and may
     // produce different codegen / be rejected under clang/MSVC.
@@ -410,11 +417,13 @@ class HnswRabitqStreamerEntity : public HnswRabitqEntity {
       LOG_ERROR("Chunk write zeros failed");
       return IndexError_Runtime;
     }
+    LOG_ERROR("[DEBUG-780] upper id=%zu zeros written", (size_t)id);
 
     if (ailego_unlikely(!upper_neighbor_index_->insert(id, meta.data))) {
       LOG_ERROR("HashMap insert value failed");
       return IndexError_Runtime;
     }
+    LOG_ERROR("[DEBUG-780] upper id=%zu hash inserted", (size_t)id);
 
     return 0;
   }
