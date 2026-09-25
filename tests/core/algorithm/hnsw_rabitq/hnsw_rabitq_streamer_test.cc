@@ -100,7 +100,8 @@ TEST_F(HnswRabitqStreamerTest, TestOpenEmptyIndex) {
   auto reformer = std::dynamic_pointer_cast<RabitqReformer>(index_reformer);
   ASSERT_NE(nullptr, reformer);
 
-  auto streamer = std::make_shared<HnswRabitqStreamer>(holder, reformer);
+  IndexStreamer::Pointer streamer =
+      std::make_shared<HnswRabitqStreamer>(holder, reformer);
   ailego::Params params;
   params.set("proxima.hnsw_rabitq.general.dimension", dim);
   ASSERT_EQ(0, streamer->init(*index_meta_ptr_, params));
