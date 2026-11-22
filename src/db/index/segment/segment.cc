@@ -48,6 +48,7 @@
 #include "db/common/typedef.h"
 #include "db/index/column/fts_column/fts_column_indexer.h"
 #include "db/index/column/fts_column/fts_indexer.h"
+#include "db/index/column/fts_column/fts_writing_index.h"
 #include "db/index/column/inverted_column/inverted_indexer.h"
 #include "db/index/column/vector_column/vector_column_indexer.h"
 #include "db/index/column/vector_column/vector_column_params.h"
@@ -305,7 +306,8 @@ class SegmentImpl : public Segment,
   Status drop_column(const std::string &column_name) override;
 
  public:
-  Status Open(const SegmentOptions &options);
+  Status Open(const SegmentOptions &options,
+              const std::function<void(uint64_t)> &on_replayed = {});
   Status create(const SegmentOptions &options, uint64_t min_doc_id);
 
  private:
@@ -357,14 +359,22 @@ class SegmentImpl : public Segment,
 
   Status insert_scalar_indexer(Doc &doc);
   Status insert_fts_indexer(Doc &doc);
+  Status prepare_fts_document(Doc &doc);
+  Status migrate_fts_writer() override;
+  Status copy_checkpoint(const std::string &destination) override;
+  Status prepare_fts_checkpoint(uint64_t epoch);
+  void publish_fts_checkpoint();
+  void preserve_fts_checkpoint();
   Status insert_vector_indexer(Doc &doc);
   Status internal_insert(Doc &doc);
   Status internal_update(Doc &doc);
   Status retire_legacy_upsert_rows(const std::unordered_set<std::string> &keys,
                                    uint64_t first_replayed_id);
   Status internal_delete(const Doc &doc);
+  Status prepare_append(Doc &doc, bool replay);
+  Status apply_logged(Doc &doc);
 
-  Status recover();
+  Status recover(const std::function<void(uint64_t)> &on_replayed);
   Status open_wal_file();
   Status append_wal(const Doc &doc);
   Status update_version(uint32_t delete_snapshot_path_suffix);
@@ -441,6 +451,8 @@ class SegmentImpl : public Segment,
 
   // FTS index (uses segment-local doc ID)
   FtsIndexer::Ptr fts_indexer_;
+  fts::FtsWritingIndex::Ptr writing_fts_;
+  std::unique_ptr<fts::PreparedFtsDocument> prepared_fts_;
   bool has_fts_{false};
 
   // vector index (uses block-local doc ID, each indexer starts from 0)
@@ -498,6 +510,7 @@ class SegmentImpl : public Segment,
 
   // WAL
   WalFilePtr wal_file_{nullptr};
+  uint64_t wal_sequence_{0};
   // Destruction is also used to release partially opened segments. Only a
   // fully initialized writer may checkpoint on close.
   bool checkpoint_on_close_{false};
@@ -583,7 +596,8 @@ bool SegmentImpl::SegmentIndexFilter::is_filtered(uint64_t id) const {
   return false;
 }
 
-Status SegmentImpl::Open(const SegmentOptions &options) {
+Status SegmentImpl::Open(const SegmentOptions &options,
+                         const std::function<void(uint64_t)> &on_replayed) {
   options_ = options;
   options_.enable_mmap_ = version_manager_->get_current_version().enable_mmap();
 
@@ -622,7 +636,7 @@ Status SegmentImpl::Open(const SegmentOptions &options) {
     block_id_allocator_ = max_block_id + 1;
 
     // recover writing block
-    s = recover();
+    s = recover(on_replayed);
     CHECK_RETURN_STATUS(s);
   } else {
     // Update block_id_allocator_
@@ -1017,15 +1031,45 @@ Status SegmentImpl::insert_vector_indexer(Doc &doc) {
   return Status::OK();
 }
 
-Status SegmentImpl::internal_insert(Doc &doc) {
-  uint64_t g_doc_id = doc_id_allocator_.fetch_add(1);
-  doc.set_doc_id(g_doc_id);
-
-  // init writing memory components
+Status SegmentImpl::prepare_append(Doc &doc, bool replay) {
+  if (!replay && (finishing_memory_block_ || ready_for_dump_block() ||
+                  (writing_fts_ && wal_file_ &&
+                   writing_fts_->needs_checkpoint(wal_file_->size_bytes())))) {
+    auto status = flush_unsafe();
+    CHECK_RETURN_STATUS(status);
+  }
+  if (replay && ready_for_dump_block()) {
+    // The caller may have reopened with a smaller buffer. Finish this private
+    // block without advancing the committed frontier or retiring the epoch.
+    const auto block = *segment_meta_->writing_forward_block();
+    for (const auto *indexes :
+         {&memory_vector_indexers_, &quant_memory_vector_indexers_}) {
+      for (const auto &[field, indexer] : *indexes) {
+        auto status = indexer->flush();
+        CHECK_RETURN_STATUS(status);
+      }
+    }
+    auto status = finish_memory_components();
+    CHECK_RETURN_STATUS(status);
+    segment_meta_->set_writing_forward_block(
+        {allocate_block_id(), BlockType::SCALAR, block.max_doc_id() + 1, 0, 0,
+         block.columns()});
+  }
+  if (doc_id_allocator_.load() == UINT64_MAX || doc_ids_.size() >= UINT32_MAX) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            "Segment document domain exhausted"};
+  }
+  // Capacity rollover and initialization must precede logging this operation.
   if (!memory_store_) {
     auto s = init_memory_components();
     CHECK_RETURN_STATUS(s);
   }
+  return prepare_fts_document(doc);
+}
+
+Status SegmentImpl::internal_insert(Doc &doc) {
+  uint64_t g_doc_id = doc_id_allocator_.fetch_add(1);
+  doc.set_doc_id(g_doc_id);
 
   // write idmap
   auto s = id_map_->upsert(doc.pk_ref(), g_doc_id);
@@ -1065,14 +1109,49 @@ Status SegmentImpl::internal_update(Doc &doc) {
 
 Status SegmentImpl::internal_delete(const Doc &doc) {
   delete_store_->mark_deleted(doc.doc_id());
-  id_map_->remove(doc.pk_ref());
-  return Status::OK();
+  return doc.pk_ref().empty() ? Status::OK() : id_map_->remove(doc.pk_ref());
+}
+
+Status SegmentImpl::apply_logged(Doc &doc) {
+  if (doc.get_operator() == Operator::DELETE && writing_fts_ && wal_file_ &&
+      writing_fts_->needs_checkpoint(wal_file_->size_bytes())) {
+    auto status = flush_unsafe();
+    CHECK_RETURN_STATUS(status);
+  }
+  auto status = append_wal(doc);
+  if (!status.ok()) {
+    prepared_fts_.reset();
+    return status;
+  }
+  switch (doc.get_operator()) {
+    case Operator::INSERT:
+      status = internal_insert(doc);
+      break;
+    case Operator::UPDATE:
+      status = internal_update(doc);
+      break;
+    case Operator::DELETE:
+      status = internal_delete(doc);
+      break;
+    default:
+      status = Status::InternalError("Unresolved WAL operation");
+  }
+  if (!status.ok() && version_manager_) {
+    version_manager_->mark_requires_recovery();
+    return Status::FailedPrecondition("WAL apply failed; reopen required: ",
+                                      status.message());
+  }
+  return status;
 }
 
 Status SegmentImpl::insert(Doc &doc) {
   std::lock_guard lock(seg_mtx_);
 
-  if (id_map_ && id_map_->has(doc.pk_ref())) {
+  auto existing = id_map_->lookup(doc.pk_ref());
+  if (!existing) {
+    return existing.error();
+  }
+  if (*existing != INVALID_DOC_ID) {
     return Status::AlreadyExists("insert failed: doc_id[", doc.pk_ref(),
                                  "] already exists in collection");
   }
@@ -1080,55 +1159,63 @@ Status SegmentImpl::insert(Doc &doc) {
   doc.set_operator(Operator::INSERT);
 
   // append WAL
-  auto s = append_wal(doc);
+  auto s = prepare_append(doc, false);
   CHECK_RETURN_STATUS(s);
-
-  return internal_insert(doc);
+  return apply_logged(doc);
 }
 
 Status SegmentImpl::update(Doc &doc) {
   std::lock_guard lock(seg_mtx_);
-  uint64_t g_doc_id;
-  if (!id_map_->has(doc.pk_ref(), &g_doc_id)) {
+  auto existing = id_map_->lookup(doc.pk_ref());
+  if (!existing) {
+    return existing.error();
+  }
+  if (*existing == INVALID_DOC_ID) {
     return Status::NotFound("update failed: doc_id[", doc.pk_ref(),
                             "] not found in collection");
   }
 
-  doc.set_doc_id(g_doc_id);
+  doc.set_doc_id(*existing);
   doc.set_operator(Operator::UPDATE);
 
   // append WAL
-  auto s = append_wal(doc);
+  auto s = prepare_append(doc, false);
   CHECK_RETURN_STATUS(s);
-
-  return internal_update(doc);
+  return apply_logged(doc);
 }
 
 Status SegmentImpl::upsert(Doc &doc) {
   std::lock_guard lock(seg_mtx_);
 
-  // Resolve the predecessor before appending. IDMap may be ahead of the WAL
-  // checkpoint when we reopen, so replay cannot resolve it a second time.
-  auto previous = id_map_->lookup(doc.pk_ref());
-  if (!previous) {
-    return previous.error();
+  // Resolve replacement once, under writer exclusion. Replay must not infer
+  // the old document from an IDMap that could already contain later writes.
+  auto existing = id_map_->lookup(doc.pk_ref());
+  if (!existing) {
+    return existing.error();
   }
-  const bool replacing = *previous != INVALID_DOC_ID;
-  if (replacing) {
-    doc.set_doc_id(*previous);
+  if (*existing != INVALID_DOC_ID) {
+    doc.set_doc_id(*existing);
+    doc.set_operator(Operator::UPDATE);
+  } else {
+    doc.set_operator(Operator::INSERT);
   }
-  doc.set_operator(replacing ? Operator::UPDATE : Operator::INSERT);
-  auto status = append_wal(doc);
+  auto s = prepare_append(doc, false);
+  if (s.ok()) {
+    s = apply_logged(doc);
+  }
   doc.set_operator(Operator::UPSERT);
-  CHECK_RETURN_STATUS(status);
-  return replacing ? internal_update(doc) : internal_insert(doc);
+  return s;
 }
 
 Status SegmentImpl::Delete(const std::string &pk) {
   std::lock_guard lock(seg_mtx_);
 
-  uint64_t g_doc_id;
-  if (!id_map_->has(pk, &g_doc_id)) {
+  auto existing = id_map_->lookup(pk);
+  if (!existing) {
+    return existing.error();
+  }
+  const uint64_t g_doc_id = *existing;
+  if (g_doc_id == INVALID_DOC_ID) {
     return Status::NotFound("primary key: ", pk, " not found");
   }
   if (delete_store_->is_deleted(g_doc_id)) {
@@ -1141,11 +1228,7 @@ Status SegmentImpl::Delete(const std::string &pk) {
   mutable_doc.set_doc_id(g_doc_id);
   mutable_doc.set_operator(Operator::DELETE);
 
-  // append WAL
-  auto s = append_wal(mutable_doc);
-  CHECK_RETURN_STATUS(s);
-
-  return internal_delete(mutable_doc);
+  return apply_logged(mutable_doc);
 }
 
 // Note: Here we have no way to determine if g_doc_id is valid
@@ -1159,10 +1242,7 @@ Status SegmentImpl::Delete(uint64_t g_doc_id) {
   mutable_doc.set_doc_id(g_doc_id);
   mutable_doc.set_operator(Operator::DELETE);
 
-  // append WAL
-  auto s = append_wal(mutable_doc);
-  CHECK_RETURN_STATUS(s);
-  return internal_delete(mutable_doc);
+  return apply_logged(mutable_doc);
 }
 
 
@@ -2333,7 +2413,7 @@ Result<Segment::PreparedFtsSeal> SegmentImpl::prepare_fts_seal(
   }
   auto metadata = std::make_shared<SegmentMeta>(*segment_meta_);
   metadata->remove_writing_forward_block();
-  if (!fts_indexer_) {
+  if (!fts_indexer_ && !writing_fts_) {
     // Explicit authority survives dropping the last FTS field. Subsequent
     // non-FTS writer switches retain the same checkpoint/commit protocol.
     return PreparedFtsSeal{std::move(metadata), nullptr};
@@ -2350,10 +2430,14 @@ Result<Segment::PreparedFtsSeal> SegmentImpl::prepare_fts_seal(
       columns.push_back(field->name());
     }
     block.set_columns(columns);
-    auto prepared = fts_indexer_->prepare_custom(
-        {seg_path_, id(), block, options_.enable_mmap_},
-        collection_schema_->fts_fields(), version_manager_->fts_retirement(),
-        hook);
+    block.fts_writing_.reset();
+    FtsIndexer::CustomTarget target{seg_path_, id(), block,
+                                    options_.enable_mmap_};
+    auto prepared = writing_fts_
+                        ? writing_fts_->seal(target, hook)
+                        : fts_indexer_->prepare_custom(
+                              target, collection_schema_->fts_fields(),
+                              version_manager_->fts_retirement(), hook);
     if (!prepared) {
       return tl::make_unexpected(prepared.error());
     }
@@ -2480,6 +2564,10 @@ void SegmentImpl::publish_fts_seal(PreparedFtsSeal prepared) {
     prepared.indexer->preserve_files();
   }
   auto retired = std::move(fts_indexer_);
+  if (writing_fts_) {
+    writing_fts_->retire_checkpoint();
+    writing_fts_.reset();
+  }
   fts_indexer_ = std::move(prepared.indexer);
   segment_meta_ = std::move(prepared.metadata);
   sealed_ = true;
@@ -2522,6 +2610,23 @@ Status SegmentImpl::flush_checkpoint(bool durable) {
   if (wal_file_ == nullptr || !wal_file_->has_record()) {
     return durable ? sync_checkpoint() : Status::OK();
   }
+
+  const auto *root = segment_meta_->writing_fts_checkpoint();
+  const uint64_t epoch = root ? root->wal_epoch : 0;
+  if (epoch == UINT64_MAX) {
+    return {StatusCode::RESOURCE_EXHAUSTED, "WAL epoch space exhausted"};
+  }
+  bool committed = false;
+  fts::FtsFileOwner::Pointer next_owner, old_owner;
+  WalFilePtr next_wal;
+  // Once forward components are being finalized, a failed V2 checkpoint
+  // cannot keep accepting writes against its partially advanced in-memory
+  // metadata. Reopen starts with the last committed descriptor and old WAL.
+  AILEGO_DEFER([&]() {
+    if (epoch && !committed) {
+      version_manager_->mark_requires_recovery();
+    }
+  });
 
   if (wal_file_) {
     if (wal_file_->flush() != 0) {
@@ -2601,20 +2706,54 @@ Status SegmentImpl::flush_checkpoint(bool durable) {
   // Files referenced by a custom-format checkpoint must be durable before
   // its manifest can make WAL cleanup safe. FileDumper/Arrow close is not
   // fsync.
-  if (durable) {
+  if (epoch) {
+    const auto path = FileHelper::MakeWalEpochPath(seg_path_, epoch + 1);
+    old_owner = version_manager_->fts_retirement()->track(
+        FileHelper::MakeWalEpochPath(seg_path_, epoch), false, false);
+    // Fail closed on a name collision. Recovery's committed keep set owns
+    // cleanup of a candidate epoch left over from a previous attempt.
+    if (FileHelper::FileExists(path)) {
+      return Status::FailedPrecondition("Successor WAL epoch already exists");
+    }
+    next_owner = version_manager_->fts_retirement()->track(path, false, true);
+    WalOptions options;
+    options.epoch = epoch + 1;
+    options.create_new = true;
+    if (WalFile::CreateAndOpen(path, options, &next_wal) != 0 ||
+        next_wal->flush() != 0) {
+      return Status::InternalError("Cannot prepare successor WAL epoch");
+    }
+    s = prepare_fts_checkpoint(options.epoch);
+    CHECK_RETURN_STATUS(s);
+  }
+  if (durable || epoch) {
     s = sync_checkpoint(delete_snapshot_path_suffix);
     CHECK_RETURN_STATUS(s);
   }
 
   // update version and flush
   s = update_version(delete_snapshot_path_suffix);
-  CHECK_RETURN_STATUS(s);
+  if (!s.ok()) {
+    if (epoch && version_manager_->requires_recovery()) {
+      // The new authority may already have been renamed.
+      next_owner->preserve();
+      preserve_fts_checkpoint();
+    }
+    return s;
+  }
+  committed = true;
   if (delete_snapshot_path_suffix != UINT32_MAX) {
     delete_store_->checkpoint_committed();
   }
 
   // clear WAL file
-  if (wal_file_) {
+  if (epoch) {
+    publish_fts_checkpoint();
+    next_owner->preserve();
+    wal_file_ = std::move(next_wal);
+    wal_sequence_ = 0;
+    old_owner->retire();
+  } else if (wal_file_) {
     auto ret = wal_file_->remove();
     if (ret != 0) {
       LOG_ERROR("WAL cleanup failed: unable to remove file, segment[%d]", id());
@@ -4964,14 +5103,23 @@ Status SegmentImpl::retire_legacy_upsert_rows(
   return Status::OK();
 }
 
-Status SegmentImpl::recover() {
+Status SegmentImpl::recover(const std::function<void(uint64_t)> &on_replayed) {
   // recover mem block meta
   const auto mem_block = segment_meta_->writing_forward_block().value();
   doc_id_allocator_.store(mem_block.min_doc_id());
 
+  const auto *root = segment_meta_->writing_fts_checkpoint();
+  const uint64_t epoch = root ? root->wal_epoch : 0;
+  const auto schema_identity =
+      root ? root->schema_identity : std::array<uint8_t, 32>{};
   std::string wal_file_path =
-      FileHelper::MakeWalPath(path_, segment_meta_->id(), mem_block.id_);
+      epoch
+          ? FileHelper::MakeWalEpochPath(seg_path_, epoch)
+          : FileHelper::MakeWalPath(path_, segment_meta_->id(), mem_block.id_);
   if (!FileHelper::FileExists(wal_file_path)) {
+    if (epoch) {
+      return Status::InternalError("Committed WAL epoch is missing");
+    }
     LOG_INFO("WAL recovery skipped: no WAL file exists [%s]",
              wal_file_path.c_str());
     return Status::OK();
@@ -4981,6 +5129,7 @@ Status SegmentImpl::recover() {
   WalOptions wal_option;
   wal_option.create_new = false;
   wal_option.read_only = options_.read_only_;
+  wal_option.epoch = epoch;
   if (WalFile::CreateAndOpen(wal_file_path, wal_option, &recover_wal_file) !=
       0) {
     LOG_ERROR("WAL recovery failed: unable to open WAL file [%s]",
@@ -5021,23 +5170,94 @@ Status SegmentImpl::recover() {
   std::lock_guard<std::shared_mutex> lock(seg_mtx_);
 
   std::unordered_set<std::string> legacy_upserts;
+  auto decode = [&](std::string_view bytes, uint64_t sequence, uint64_t next_id,
+                    size_t row) -> Result<Doc::Ptr> {
+    std::optional<WalOperation> operation;
+    if (epoch) {
+      auto op = WalOperation::Decode(bytes);
+      if (!op || op->epoch != epoch || op->sequence != sequence ||
+          op->schema_identity != schema_identity ||
+          (op->kind != WalOperation::Kind::kDelete &&
+           (op->new_id != next_id || op->parent_row != row)) ||
+          (op->kind != WalOperation::Kind::kInsert && op->old_id >= next_id)) {
+        return tl::make_unexpected(
+            Status::InternalError("WAL operation identity mismatch"));
+      }
+      operation = *op;
+      bytes = op->payload;
+    }
+    auto doc = Doc::deserialize(reinterpret_cast<const uint8_t *>(bytes.data()),
+                                bytes.size());
+    if (!doc) {
+      return tl::make_unexpected(
+          Status::InternalError("Invalid WAL document at record ", sequence));
+    }
+    if (operation) {
+      const auto kind = operation->kind;
+      const auto expected =
+          kind == WalOperation::Kind::kInsert
+              ? Operator::INSERT
+              : (kind == WalOperation::Kind::kReplace ? Operator::UPDATE
+                                                      : Operator::DELETE);
+      if (doc->get_operator() != expected ||
+          (kind != WalOperation::Kind::kInsert &&
+           doc->doc_id() != operation->old_id)) {
+        return tl::make_unexpected(
+            Status::InternalError("WAL payload disagrees with operation"));
+      }
+    }
+    return doc;
+  };
+  if (epoch && recover_wal_file->has_record()) {
+    // A corrupt complete record must fail before an earlier valid record can
+    // mutate the shared ID map or a forward block. Hold one frame at a time.
+    uint64_t sequence = 0, next_id = doc_id_allocator_.load();
+    size_t row = doc_ids_.size();
+    while (true) {
+      auto record = recover_wal_file->next_checked();
+      if (!record) {
+        return record.error();
+      }
+      if (record->state != WalReadResult::State::kRecord) {
+        break;
+      }
+      auto doc = decode(record->data, sequence++, next_id, row);
+      if (!doc) {
+        return doc.error();
+      }
+      if ((*doc)->get_operator() != Operator::DELETE) {
+        ++next_id;
+        ++row;
+      }
+    }
+    if (recover_wal_file->prepare_for_read() != 0) {
+      return Status::InternalError("Cannot rewind validated WAL");
+    }
+  }
   while (true) {
-    std::string buf = recover_wal_file->next();
-    if (buf.empty()) {
+    auto record = recover_wal_file->next_checked();
+    if (!record) {
+      return record.error();
+    }
+    if (record->state == WalReadResult::State::kTruncatedTail) {
+      auto status = recover_wal_file->discard_truncated_tail();
+      CHECK_RETURN_STATUS(status);
       break;
     }
-    total_recovered_doc_count++;
-    auto doc = Doc::deserialize(reinterpret_cast<const uint8_t *>(buf.data()),
-                                buf.size());
-    if (doc == nullptr) {
-      LOG_ERROR(
-          "WAL record recovery failed: path[%s], segment[%d], record[%zu], "
-          "reason[deserialization failed]",
-          wal_file_path.c_str(), id(), (size_t)total_recovered_doc_count);
-      continue;
+    if (record->state == WalReadResult::State::kEnd) {
+      break;
     }
-
+    auto decoded = decode(record->data, total_recovered_doc_count++,
+                          doc_id_allocator_.load(), doc_ids_.size());
+    if (!decoded) {
+      return decoded.error();
+    }
+    auto doc = std::move(*decoded);
     Status status;
+    if (doc->get_operator() != Operator::DELETE) {
+      status = prepare_append(*doc, true);
+      CHECK_RETURN_STATUS(status);
+    }
     switch (doc->get_operator()) {
       case Operator::INSERT: {
         status = internal_insert(*doc);
@@ -5084,6 +5304,9 @@ Status SegmentImpl::recover() {
     }
 
     recovered_doc_count[static_cast<size_t>(doc->get_operator())]++;
+    if (on_replayed) {
+      on_replayed(total_recovered_doc_count);
+    }
   }
 
   if (!legacy_upserts.empty()) {
@@ -5092,22 +5315,12 @@ Status SegmentImpl::recover() {
     CHECK_RETURN_STATUS(status);
   }
 
-  ret = recover_wal_file->close();
-  if (ret != 0) {
-    LOG_ERROR(
-        "WAL recovery failed: unable to close file, path[%s], "
-        "segment[%d], ret[%d]",
-        wal_file_path.c_str(), id(), ret);
-    return Status::InternalError("Failed to close recovered WAL file: path[",
-                                 wal_file_path, "], segment[", id(), "], ret[",
-                                 ret, "]");
-  }
-  recover_wal_file.reset();
+  wal_sequence_ = total_recovered_doc_count;
 
   // FTS rows/TF/positions replay idempotently, but a crash may already have
   // flushed their statistics before the forward checkpoint was committed.
   // Recount exact lengths once, instead of counting replayed rows twice.
-  if (fts_indexer_) {
+  if (fts_indexer_ && !epoch) {
     auto status = fts_indexer_->recover_statistics(doc_ids_.size());
     CHECK_RETURN_STATUS(status);
   }
@@ -5126,18 +5339,24 @@ Status SegmentImpl::recover() {
   // optimize() flush the writing segment before sealing it; without an open
   // member WAL, flush() treats the recovered memory components as empty and
   // returns without persisting them.
-  return open_wal_file();
+  wal_file_ = std::move(recover_wal_file);
+  return Status::OK();
 }
 
 Status SegmentImpl::open_wal_file() {
   auto mem_block = segment_meta_->writing_forward_block().value();
+  const auto *root = segment_meta_->writing_fts_checkpoint();
   std::string wal_file_path =
-      FileHelper::MakeWalPath(path_, segment_meta_->id(), mem_block.id_);
+      root ? FileHelper::MakeWalEpochPath(seg_path_, root->wal_epoch)
+           : FileHelper::MakeWalPath(path_, segment_meta_->id(), mem_block.id_);
   WalOptions wal_option;
+  wal_option.epoch = root ? root->wal_epoch : 0;
   if (FileHelper::FileExists(wal_file_path)) {
     wal_option.create_new = false;
-  } else {
+  } else if (!root) {
     wal_option.create_new = true;
+  } else {
+    return Status::InternalError("Missing committed WAL epoch");
   }
 
   if (WalFile::CreateAndOpen(wal_file_path, wal_option, &wal_file_) != 0) {
@@ -5160,30 +5379,59 @@ Status SegmentImpl::append_wal(const Doc &doc) {
   if (finishing_memory_block_) {
     auto status = flush_checkpoint(true);
     CHECK_RETURN_STATUS(status);
-  } else if (doc.get_operator() != Operator::DELETE && ready_for_dump_block()) {
-    // The old checkpoint may retire its WAL. Log the new row only after
-    // rollover and before applying any deletion of its predecessor.
-    auto status = flush_unsafe();
-    CHECK_RETURN_STATUS(status);
   }
-  std::vector<uint8_t> buf = doc.serialize();
+  const auto bytes = doc.serialize();
+  const auto *root = segment_meta_->writing_fts_checkpoint();
+  std::string buf;
+  if (root) {
+    WalOperation op;
+    op.epoch = root->wal_epoch;
+    op.schema_identity = root->schema_identity;
+    op.sequence = wal_sequence_;
+    op.payload = {reinterpret_cast<const char *>(bytes.data()), bytes.size()};
+    if (doc.get_operator() != Operator::INSERT) {
+      op.old_id = doc.doc_id();
+      op.kind = doc.get_operator() == Operator::DELETE
+                    ? WalOperation::Kind::kDelete
+                    : WalOperation::Kind::kReplace;
+    }
+    if (op.kind != WalOperation::Kind::kDelete) {
+      op.new_id = doc_id_allocator_.load();
+      op.parent_row = static_cast<uint32_t>(doc_ids_.size());
+    }
+    auto encoded = op.encode();
+    if (!encoded) {
+      return encoded.error();
+    }
+    buf = std::move(*encoded);
+  } else {
+    if (bytes.size() > (4u << 20)) {
+      return {StatusCode::RESOURCE_EXHAUSTED,
+              "Document exceeds legacy WAL record limit"};
+    }
+    buf.assign(bytes.begin(), bytes.end());
+  }
 
   if (!wal_file_) {
     auto s = open_wal_file();
     CHECK_RETURN_STATUS(s);
   }
 
-  auto ret = wal_file_->append(std::string(buf.begin(), buf.end()));
+  auto ret = wal_file_->append(std::move(buf));
   if (ret != 0) {
+    if (version_manager_) {
+      version_manager_->mark_requires_recovery();
+    }
     LOG_ERROR("WAL append failed: segment[%d], pk[%s], operator[%d], ret[%d]",
               id(), doc.pk_ref().c_str(), static_cast<int>(doc.get_operator()),
               ret);
-    return Status::InternalError("Failed to append WAL: segment[", id(),
-                                 "], pk[", doc.pk_ref(), "], operator[",
-                                 static_cast<int>(doc.get_operator()),
-                                 "], ret[", ret, "]");
+    return Status::FailedPrecondition(
+        "WAL append uncertain; reopen required: segment[", id(), "], pk[",
+        doc.pk_ref(), "], operator[", static_cast<int>(doc.get_operator()),
+        "], ret[", ret, "]");
   }
 
+  ++wal_sequence_;
   return Status::OK();
 }
 
@@ -5292,6 +5540,12 @@ Status SegmentImpl::sync_checkpoint(uint32_t delete_suffix, bool immutable) {
                block.columns().size() == 1) {
       file = FileHelper::MakeQuantizeVectorIndexPath(
           seg_path_, block.columns()[0], block.id());
+    } else if (block.fts_writing_) {
+      for (const auto &run : block.fts_writing_->runs) {
+        auto status = DurableFile::Sync(FileHelper::MakeFtsRunPath(
+            seg_path_, block.id(), run.generation, run.id));
+        CHECK_RETURN_STATUS(status);
+      }
     }
     if (!file.empty()) {
       auto status = DurableFile::Sync(file);
@@ -5388,13 +5642,12 @@ Result<Segment::Ptr> Segment::CreateAndOpen(
   return segment;
 }
 
-Result<Segment::Ptr> Segment::Open(const std::string &path,
-                                   const CollectionSchema &schema,
-                                   const SegmentMeta &segment_meta,
-                                   const IDMap::Ptr &id_map,
-                                   const DeleteStore::Ptr &delete_store,
-                                   const VersionManager::Ptr &version_manager,
-                                   const SegmentOptions &options) {
+Result<Segment::Ptr> Segment::Open(
+    const std::string &path, const CollectionSchema &schema,
+    const SegmentMeta &segment_meta, const IDMap::Ptr &id_map,
+    const DeleteStore::Ptr &delete_store,
+    const VersionManager::Ptr &version_manager, const SegmentOptions &options,
+    const std::function<void(uint64_t)> &on_replayed) {
   auto segment = std::shared_ptr<SegmentImpl>(new SegmentImpl(
       path, schema, segment_meta, id_map, delete_store, version_manager));
 
@@ -5405,7 +5658,7 @@ Result<Segment::Ptr> Segment::Open(const std::string &path,
         "Segment open failed: segment path not found [", segment_path, "]"));
   }
 
-  auto s = segment->Open(options);
+  auto s = segment->Open(options, on_replayed);
   CHECK_RETURN_STATUS_EXPECTED(s);
 
   return segment;
@@ -5422,6 +5675,38 @@ Status SegmentImpl::open_fts_indexers(bool create) {
 
   if (create) {
     auto block_id = allocate_block_id();
+    if (version_manager_ && version_manager_->use_fts_runs()) {
+      auto created = fts::FtsWritingIndex::Open(
+          seg_path_, id(), block_id, options_.enable_mmap_, *collection_schema_,
+          version_manager_->fts_retirement(),
+          version_manager_->fts_read_budget(),
+          fts::FtsWritingOptions::WithBudget(
+              version_manager_->fts_write_budget()));
+      if (!created) {
+        return created.error();
+      }
+      writing_fts_ = std::move(*created);
+      std::vector<std::string> columns;
+      for (const auto &field : collection_schema_->fts_fields()) {
+        columns.push_back(field->name());
+      }
+      segment_meta_->add_persisted_block(
+          BlockMeta{block_id, BlockType::FTS_INDEX, 0, 0, 0, columns});
+      auto status = prepare_fts_checkpoint(1);
+      CHECK_RETURN_STATUS(status);
+      WalOptions options;
+      options.create_new = true;
+      options.epoch = 1;
+      if (WalFile::CreateAndOpen(FileHelper::MakeWalEpochPath(seg_path_, 1),
+                                 options, &wal_file_) != 0 ||
+          wal_file_->flush() != 0) {
+        return Status::InternalError("Cannot create initial FTS WAL epoch");
+      }
+      status = DurableFile::SyncDirectory(seg_path_);
+      CHECK_RETURN_STATUS(status);
+      has_fts_ = true;
+      return Status::OK();
+    }
     auto fts_path = FileHelper::MakeFtsIndexPath(seg_path_, block_id);
     fts_indexer_ = FtsIndexer::CreateAndOpen(
         fts_path, collection_schema_->fts_fields(), true, false,
@@ -5435,6 +5720,24 @@ Status SegmentImpl::open_fts_indexers(bool create) {
   } else {
     for (const auto &block : segment_meta_->persisted_blocks()) {
       if (block.type() == BlockType::FTS_INDEX) {
+        if (block.fts_writing_) {
+          if (!version_manager_ || !version_manager_->use_fts_runs()) {
+            return Status::FailedPrecondition(
+                "Missing FTS writing format gate");
+          }
+          auto opened = fts::FtsWritingIndex::Open(
+              seg_path_, id(), block.id(), options_.enable_mmap_,
+              *collection_schema_, version_manager_->fts_retirement(),
+              version_manager_->fts_read_budget(),
+              fts::FtsWritingOptions::WithBudget(
+                  version_manager_->fts_write_budget()),
+              &*block.fts_writing_);
+          if (!opened) {
+            return opened.error();
+          }
+          writing_fts_ = std::move(*opened);
+          break;
+        }
         if (block.fts_base_) {
           if (!version_manager_) {
             return Status::InternalError("Missing FTS version owner");
@@ -5463,7 +5766,7 @@ Status SegmentImpl::open_fts_indexers(bool create) {
     }
   }
 
-  has_fts_ = (fts_indexer_ != nullptr);
+  has_fts_ = (fts_indexer_ != nullptr || writing_fts_ != nullptr);
   return Status::OK();
 }
 
@@ -5475,13 +5778,231 @@ Status SegmentImpl::flush_fts_indexers() {
 }
 
 Status SegmentImpl::close_fts_indexers() {
+  prepared_fts_.reset();
+  writing_fts_.reset();
   if (fts_indexer_) {
     fts_indexer_.reset();
   }
   return Status::OK();
 }
 
+Status SegmentImpl::prepare_fts_document(Doc &doc) {
+  if (!writing_fts_) {
+    return Status::OK();
+  }
+  prepared_fts_.reset();
+  if (writing_fts_->rows() != doc_ids_.size()) {
+    return Status::InternalError("FTS writing row frontier mismatch");
+  }
+  fts::FtsWritingIndex::Fields values;
+  for (const auto &field : collection_schema_->fts_fields()) {
+    values.emplace_back();
+    if (doc.has_value(field->name())) {
+      values.back() = doc.get_ref<std::string>(field->name());
+    }
+  }
+  auto prepared = writing_fts_->prepare(values);
+  if (!prepared) {
+    return prepared.error();
+  }
+  prepared_fts_ = std::move(*prepared);
+  return Status::OK();
+}
+
+Status SegmentImpl::migrate_fts_writer() {
+  std::lock_guard lock(seg_mtx_);
+  if (writing_fts_) {
+    return Status::OK();
+  }
+  if (sealed_ || !fts_indexer_ || !version_manager_ || options_.read_only_) {
+    return Status::FailedPrecondition(
+        "Migration requires a legacy writing FTS index");
+  }
+  auto status = flush_checkpoint(true);
+  CHECK_RETURN_STATUS(status);
+  auto next_meta = std::make_shared<SegmentMeta>(*segment_meta_);
+  for (auto &block : next_meta->persisted_blocks()) {
+    if (block.type() != BlockType::FTS_INDEX) {
+      continue;
+    }
+    if (doc_ids_.size() > UINT32_MAX) {
+      return Status::InvalidArgument(
+          "Legacy FTS row domain exceeds run format");
+    }
+    block.set_doc_count(static_cast<uint32_t>(doc_ids_.size()));
+    std::vector<std::string> names;
+    for (const auto &field : collection_schema_->fts_fields()) {
+      names.push_back(field->name());
+    }
+    block.set_columns(names);
+    auto retirement = version_manager_->fts_retirement();
+    auto next = fts::FtsWritingIndex::Open(
+        seg_path_, id(), block.id(), options_.enable_mmap_, *collection_schema_,
+        retirement, version_manager_->fts_read_budget(),
+        fts::FtsWritingOptions::WithBudget(
+            version_manager_->fts_write_budget()));
+    if (!next) {
+      return next.error();
+    }
+    status = (*next)->import_legacy(
+        *fts_indexer_, {seg_path_, id(), block, options_.enable_mmap_});
+    CHECK_RETURN_STATUS(status);
+    auto root = (*next)->checkpoint(1);
+    if (!root) {
+      return root.error();
+    }
+    block.fts_writing_ = std::move(*root);
+    const auto path = FileHelper::MakeWalEpochPath(seg_path_, 1);
+    WalOptions options;
+    options.create_new = true;
+    options.epoch = 1;
+    WalFilePtr wal;
+    if (WalFile::CreateAndOpen(path, options, &wal) != 0) {
+      return Status::InternalError("Cannot reserve migration WAL epoch");
+    }
+    auto epoch_owner = retirement->track(path, false, true);
+    if (wal->flush() != 0) {
+      return Status::InternalError("Cannot sync migration WAL epoch");
+    }
+    status = DurableFile::SyncDirectory(seg_path_);
+    CHECK_RETURN_STATUS(status);
+    auto candidate = version_manager_->get_current_version();
+    candidate.reset_writing_segment_meta(next_meta);
+    candidate.set_use_fts_runs(true);
+    status = version_manager_->commit(candidate);
+    if (status.ok() || version_manager_->requires_recovery()) {
+      epoch_owner->preserve();
+      (*next)->preserve_checkpoint();
+    }
+    CHECK_RETURN_STATUS(status);
+    (*next)->publish_checkpoint();
+    version_manager_->select_fts_runs(true);
+    writing_fts_ = std::move(*next);
+    segment_meta_ = std::move(next_meta);
+    wal_file_ = std::move(wal);
+    wal_sequence_ = 0;
+    fts_indexer_->retire_files();
+    fts_indexer_.reset();
+    return Status::OK();
+  }
+  return Status::InternalError("Missing legacy FTS block");
+}
+
+Status SegmentImpl::copy_checkpoint(const std::string &destination) {
+  std::shared_lock lock(seg_mtx_);
+  const auto path = FileHelper::MakeSegmentPath(destination, id());
+  const auto directory = ailego::FileHelper::PathFromUtf8(path);
+  std::error_code error;
+  if (!std::filesystem::create_directory(directory, error)) {
+    return Status::InternalError("Cannot create snapshot segment: ",
+                                 error.message());
+  }
+  auto copy = [&](const std::string &source) {
+    auto file = ailego::FileHelper::PathFromUtf8(source);
+    if (!std::filesystem::copy_file(file, directory / file.filename(), error)) {
+      return Status::InternalError("Cannot copy checkpoint file: ", source,
+                                   ": ", error.message());
+    }
+    return Status::OK();
+  };
+  for (const auto &block : segment_meta_->persisted_blocks()) {
+    Status status;
+    switch (block.type()) {
+      case BlockType::SCALAR:
+        status = copy(FileHelper::MakeForwardBlockPath(seg_path_, block.id(),
+                                                       !options_.enable_mmap_));
+        break;
+      case BlockType::SCALAR_INDEX:
+        if (!invert_indexers_) {
+          return Status::InternalError("Missing snapshot scalar index");
+        }
+        status = invert_indexers_->create_snapshot(
+            FileHelper::MakeInvertIndexPath(path, block.id()));
+        break;
+      case BlockType::VECTOR_INDEX:
+      case BlockType::VECTOR_INDEX_QUANTIZE:
+        if (block.columns().size() != 1) {
+          return Status::InternalError("Invalid snapshot vector block");
+        }
+        status = copy(block.type() == BlockType::VECTOR_INDEX
+                          ? FileHelper::MakeVectorIndexPath(
+                                seg_path_, block.columns()[0], block.id())
+                          : FileHelper::MakeQuantizeVectorIndexPath(
+                                seg_path_, block.columns()[0], block.id()));
+        break;
+      case BlockType::FTS_INDEX:
+        if (block.fts_writing_) {
+          for (const auto &run : block.fts_writing_->runs) {
+            status = copy(FileHelper::MakeFtsRunPath(seg_path_, block.id(),
+                                                     run.generation, run.id));
+            CHECK_RETURN_STATUS(status);
+          }
+          WalOptions options;
+          options.create_new = true;
+          options.epoch = block.fts_writing_->wal_epoch;
+          WalFilePtr empty_epoch;
+          if (WalFile::CreateAndOpen(
+                  FileHelper::MakeWalEpochPath(path, options.epoch), options,
+                  &empty_epoch) != 0 ||
+              empty_epoch->flush() != 0 || empty_epoch->close() != 0) {
+            return Status::InternalError(
+                "Cannot create independent snapshot WAL");
+          }
+        } else if (block.fts_base_) {
+          status = copy(FileHelper::MakeCustomFtsPath(
+              seg_path_, block.id(), block.fts_base_->generation,
+              block.fts_base_->base_id));
+        } else {
+          if (!fts_indexer_) {
+            return Status::InternalError("Missing legacy snapshot FTS index");
+          }
+          status = fts_indexer_->create_snapshot(
+              FileHelper::MakeFtsIndexPath(path, block.id()));
+        }
+        break;
+      default:
+        return Status::NotSupported("Unsupported snapshot block");
+    }
+    CHECK_RETURN_STATUS(status);
+  }
+  return Status::OK();
+}
+
+Status SegmentImpl::prepare_fts_checkpoint(uint64_t epoch) {
+  if (!writing_fts_) {
+    return Status::FailedPrecondition(
+        "FTS run checkpoint requires a writing index");
+  }
+  for (auto &block : segment_meta_->persisted_blocks()) {
+    if (block.type() == BlockType::FTS_INDEX) {
+      auto descriptor = writing_fts_->checkpoint(epoch);
+      if (!descriptor) {
+        return descriptor.error();
+      }
+      block.set_doc_count(descriptor->row_frontier);
+      block.fts_writing_ = std::move(*descriptor);
+      return Status::OK();
+    }
+  }
+  return Status::InternalError("Missing FTS checkpoint block");
+}
+
+void SegmentImpl::publish_fts_checkpoint() {
+  writing_fts_->publish_checkpoint();
+}
+void SegmentImpl::preserve_fts_checkpoint() {
+  writing_fts_->preserve_checkpoint();
+}
+
 Status SegmentImpl::insert_fts_indexer(Doc &doc) {
+  if (writing_fts_) {
+    if (!prepared_fts_) {
+      return Status::InternalError("Missing prepared FTS document");
+    }
+    writing_fts_->apply(*prepared_fts_);
+    prepared_fts_.reset();
+    return Status::OK();
+  }
   if (!has_fts_) {
     return Status::OK();
   }
@@ -5518,7 +6039,19 @@ fts::FtsColumnIndexerPtr SegmentImpl::get_fts_indexer(
 Result<std::vector<fts::FtsResult>> SegmentImpl::fts_search(
     const std::string &field_name, const fts::FtsAstNode &ast,
     const fts::FtsQueryParams &params) {
-  auto indexer = get_fts_indexer(field_name);
+  std::shared_lock lock(seg_mtx_);
+  if (writing_fts_) {
+    auto indexer = writing_fts_->reader(field_name);
+    if (!indexer) {
+      return tl::make_unexpected(indexer.error());
+    }
+    // The collection read barrier fixes this view through query completion.
+    // A deletion filter may acquire seg_mtx_ again to translate a row.
+    lock.unlock();
+    return (*indexer)->search(ast, params);
+  }
+  auto indexer = fts_indexer_ ? fts_indexer_->get(field_name) : nullptr;
+  lock.unlock();
   if (!indexer) {
     return tl::make_unexpected(
         Status::NotFound("FTS indexer not found: ", field_name));
@@ -5839,9 +6372,8 @@ Result<fts::FtsFieldSource::Ptr> SegmentImpl::build_fts_field(
     return tl::make_unexpected(
         Status::InvalidArgument("FTS rebuild requires a string field"));
   }
-  // Only the changed field is analyzed again. The private mutable index uses
-  // the regular insert semantics, then feeds the direct custom writer (never
-  // the legacy BitPacked seal). Its source pins the temporary custom file
+  // Only the changed field is analyzed again. Its private builder follows
+  // the collection's writing format. The source pins the generated file
   // until the complete multi-field generation has consumed it.
   auto retirement = version_manager_->fts_retirement();
   fts::FtsFileOwner::Pointer workspace;
@@ -5865,11 +6397,29 @@ Result<fts::FtsFieldSource::Ptr> SegmentImpl::build_fts_field(
                                       "Cannot reserve FTS rebuild directory"});
   }
   FieldSchemaPtrList fields{field};
-  auto indexer = FtsIndexer::CreateAndOpen(path + "/mutable", fields, true,
-                                           false, retirement);
-  if (!indexer) {
-    return tl::make_unexpected(
-        Status::InternalError("Cannot create private FTS rebuild index"));
+  FtsIndexer::Ptr indexer;
+  fts::FtsWritingIndex::Ptr builder;
+  const auto field_block_id = allocate_block_id();
+  if (version_manager_->use_fts_runs()) {
+    CollectionSchema field_schema(collection_schema_->name());
+    auto status = field_schema.add_field(field);
+    CHECK_RETURN_STATUS_EXPECTED(status);
+    auto created = fts::FtsWritingIndex::Open(
+        path, id(), field_block_id, options_.enable_mmap_, field_schema,
+        retirement, version_manager_->fts_read_budget(),
+        fts::FtsWritingOptions::WithBudget(
+            version_manager_->fts_write_budget()));
+    if (!created) {
+      return tl::make_unexpected(created.error());
+    }
+    builder = std::move(*created);
+  } else {
+    indexer = FtsIndexer::CreateAndOpen(path + "/mutable", fields, true, false,
+                                        retirement);
+    if (!indexer) {
+      return tl::make_unexpected(
+          Status::InternalError("Cannot create private FTS rebuild index"));
+    }
   }
   auto reader = scan({GLOBAL_DOC_ID, field->name()});
   if (!reader) {
@@ -5896,7 +6446,17 @@ Result<fts::FtsFieldSource::Ptr> SegmentImpl::build_fts_field(
     }
     auto strings = std::static_pointer_cast<arrow::StringArray>(column);
     for (int64_t i = 0; i < strings->length(); ++i, ++row) {
-      if (!strings->IsNull(i)) {
+      if (builder) {
+        std::optional<std::string_view> text;
+        if (!strings->IsNull(i)) {
+          text = strings->GetView(i);
+        }
+        auto prepared = builder->prepare({text});
+        if (!prepared) {
+          return tl::make_unexpected(prepared.error());
+        }
+        builder->apply(**prepared);
+      } else if (!strings->IsNull(i)) {
         auto status = indexer->insert(field->name(), static_cast<uint32_t>(row),
                                       strings->GetString(i));
         if (!status.ok()) {
@@ -5909,18 +6469,20 @@ Result<fts::FtsFieldSource::Ptr> SegmentImpl::build_fts_field(
     return tl::make_unexpected(
         Status::InternalError("Truncated FTS rebuild forward domain"));
   }
-  auto status = indexer->flush();
-  if (!status.ok()) {
-    return tl::make_unexpected(status);
+  if (indexer) {
+    auto status = indexer->flush();
+    CHECK_RETURN_STATUS_EXPECTED(status);
   }
-  BlockMeta block{allocate_block_id(),
+  BlockMeta block{field_block_id,
                   BlockType::FTS_INDEX,
                   segment_meta_->min_doc_id(),
                   segment_meta_->max_doc_id(),
                   rows,
                   {field->name()}};
-  auto prepared = indexer->prepare_custom(
-      {seg_path_, id(), block, options_.enable_mmap_}, fields, retirement);
+  FtsIndexer::CustomTarget target{seg_path_, id(), block,
+                                  options_.enable_mmap_};
+  auto prepared = builder ? builder->seal(target)
+                          : indexer->prepare_custom(target, fields, retirement);
   if (!prepared) {
     return tl::make_unexpected(prepared.error());
   }

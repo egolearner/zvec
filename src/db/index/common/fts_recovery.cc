@@ -55,6 +55,9 @@ bool OwnedRootFile(std::string_view name) {
 }
 
 bool OwnedFtsEntry(std::string_view name, bool directory) {
+  if (!directory && name.substr(0, 10) == "wal.epoch.") {
+    return name.substr(10) != "0" && Number(name.substr(10), UINT64_MAX);
+  }
   if (name.substr(0, 4) != "fts.") {
     return false;
   }
@@ -75,7 +78,7 @@ bool OwnedFtsEntry(std::string_view name, bool directory) {
   } else {
     StripSuffix(&name, ".pending");
   }
-  if (!StripSuffix(&name, ".zfts")) {
+  if (!StripSuffix(&name, ".zfts") && !StripSuffix(&name, ".run")) {
     return false;
   }
   separator = name.find('.');
@@ -158,6 +161,17 @@ Status VersionManager::reclaim_unreferenced_files() {
     std::set<std::string> keep;
     for (const auto &block : meta->persisted_blocks()) {
       if (block.type() != BlockType::FTS_INDEX) {
+        continue;
+      }
+      if (block.fts_writing_) {
+        const auto &root = *block.fts_writing_;
+        keep.insert("wal.epoch." + std::to_string(root.wal_epoch));
+        for (const auto &run : root.runs) {
+          auto path = FileHelper::MakeFtsRunPath(directory, block.id(),
+                                                 run.generation, run.id);
+          keep.insert(
+              ailego::FileHelper::PathFromUtf8(path).filename().u8string());
+        }
         continue;
       }
       auto file = block.fts_base_

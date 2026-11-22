@@ -37,20 +37,20 @@ class FtsFileOwner {
   FtsFileOwner &operator=(const FtsFileOwner &) = delete;
 
   // Preserve both committed files and candidates whose commit is uncertain.
-  void preserve() noexcept {
-    remove_.store(false, std::memory_order_release);
-  }
+  void preserve() noexcept;
   // Only call after a new authoritative version no longer references this
   // generation. Actual removal waits for every reader/range/snapshot pin.
-  void retire() noexcept {
-    remove_.store(true, std::memory_order_release);
-  }
+  void retire() noexcept;
+  // Register once the complete run size is known, including on reopen.
+  void register_run(uint64_t bytes);
 
  private:
   friend class FtsRetirementQueue;
   struct Entry {
     std::string path;
     bool directory;
+    uint64_t bytes{0};
+    bool retired{false};
   };
   FtsFileOwner(std::shared_ptr<FtsRetirementQueue> queue, std::string path,
                bool directory, bool candidate);
@@ -83,6 +83,12 @@ class FtsRetirementQueue
   FtsFileOwner::Pointer track(std::string path, bool directory, bool candidate);
   size_t retry();
   size_t pending() const;
+  uint64_t uncheckpointed_bytes() const {
+    return uncheckpointed_bytes_.load();
+  }
+  uint64_t retired_bytes() const {
+    return retired_bytes_.load();
+  }
 
  private:
   friend class FtsFileOwner;
@@ -97,6 +103,7 @@ class FtsRetirementQueue
   mutable std::mutex mutex_;
   std::list<FtsFileOwner::Entry> pending_;
   std::unordered_map<std::string, Tracked> owners_;
+  std::atomic<uint64_t> uncheckpointed_bytes_{0}, retired_bytes_{0};
 };
 
 }  // namespace zvec::fts

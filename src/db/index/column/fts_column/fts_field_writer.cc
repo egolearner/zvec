@@ -67,7 +67,8 @@ FtsFieldWriter::FtsFieldWriter(uint64_t rows, format::FieldMetadata metadata,
 }
 
 Result<std::unique_ptr<FtsFieldWriter>> FtsFieldWriter::Create(
-    uint64_t rows, format::FieldMetadata metadata, BM25Params params) {
+    uint64_t rows, format::FieldMetadata metadata, BM25Params params,
+    const std::shared_ptr<FtsSpoolWorkspace> &workspace) {
   if (rows > UINT32_MAX || metadata.present_count > rows ||
       metadata.scoring_document_count > rows ||
       (metadata.scoring_document_count == 0 && metadata.total_tokens != 0) ||
@@ -79,17 +80,17 @@ Result<std::unique_ptr<FtsFieldWriter>> FtsFieldWriter::Create(
       new FtsFieldWriter(rows, std::move(metadata), params));
   for (auto *spool : {&writer->documents_, &writer->raw_, &writer->postings_,
                       &writer->skips_, &writer->lengths_}) {
-    auto created = FtsSpool::Create();
+    auto created = FtsSpool::Create(workspace);
     if (!created) {
       return tl::make_unexpected(created.error());
     }
     *spool = std::move(*created);
   }
-  auto dictionary = FtsDictionaryWriter::Create();
+  auto dictionary = FtsDictionaryWriter::Create(workspace);
   if (!dictionary) {
     return tl::make_unexpected(dictionary.error());
   }
-  auto positions = FtsPositionsWriter::Create();
+  auto positions = FtsPositionsWriter::Create(workspace);
   if (!positions) {
     return tl::make_unexpected(positions.error());
   }

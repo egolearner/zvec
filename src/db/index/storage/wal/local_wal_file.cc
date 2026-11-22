@@ -21,13 +21,35 @@
 #include "db/common/error_code.h"
 #include "db/common/file_helper.h"
 #include "db/common/typedef.h"
-
-#define MAX_RECORD_SIZE 4194304  // 4Mb
+#include "db/index/column/fts_column/fts_format.h"
 
 namespace zvec {
+namespace {
+
+// Legacy readers accept up to 4 MiB. Epoch readers reserve up to 64 MiB
+// including the operation envelope and serialized document.
+size_t RecordLimit(uint64_t epoch) {
+  return epoch == 0 ? 4ULL << 20 : 64ULL << 20;
+}
+
+std::string EpochHeader(uint64_t epoch) {
+  std::string bytes("ZVWALE01", 8);
+  fts::format::AppendU64(epoch, &bytes);
+  bytes.resize(32, '\0');
+  fts::format::Sha256 hash;
+  hash.update(bytes);
+  const auto digest = hash.digest();
+  bytes.append(reinterpret_cast<const char *>(digest.data()), digest.size());
+  return bytes;
+}
+
+}  // namespace
 
 int LocalWalFile::append(std::string &&data) {
   CHECK_STATUS(read_only_, false);
+  if (data.empty() || data.size() > RecordLimit(epoch_)) {
+    return -1;
+  }
   WalRecord record;
   record.length_ = data.size();
   record.crc_ = ailego::Crc32c::Hash(
@@ -44,6 +66,7 @@ int LocalWalFile::append(std::string &&data) {
     if (!file_.flush()) {
       WLOG_ERROR("Wal flush error. docs_count_[%zu] max_docs_wal_flush_[%zu]",
                  (size_t)docs_count_, (size_t)max_docs_wal_flush_);
+      return -1;
     }
     docs_count_ = 0;
   }
@@ -51,25 +74,17 @@ int LocalWalFile::append(std::string &&data) {
 }
 
 std::string LocalWalFile::next() {
-  WalRecord record;
-  if (read_record(record) > 0) {
-    uint32_t tmp_crc = ailego::Crc32c::Hash(
-        reinterpret_cast<const void *>(record.content_.data()), record.length_,
-        0);
-    if (tmp_crc == record.crc_) {
-      return std::move(record.content_);
-    } else {
-      WLOG_ERROR(
-          "Wal next error. record.length_[%zu] crc_[%zu] != tmp_crc[%zu]",
-          (size_t)record.length_, (size_t)record.crc_, (size_t)tmp_crc);
-    }
+  auto record = next_checked();
+  if (record && record->state == WalReadResult::State::kRecord) {
+    return std::move(record->data);
   }
-  // end of file or read error
   return std::string();
 }
 
 int LocalWalFile::open(const WalOptions &wal_option) {
   CHECK_STATUS(opened_, false);
+  epoch_ = wal_option.epoch;
+  truncated_at_.reset();
   if (wal_option.read_only && wal_option.create_new) {
     WLOG_ERROR("Cannot create a read-only WAL file");
     return -1;
@@ -87,10 +102,15 @@ int LocalWalFile::open(const WalOptions &wal_option) {
     }
 
     // write wal header
-    int write_size = file_.write((const void *)&header_, sizeof(header_));
+    const auto bytes =
+        epoch_ ? EpochHeader(epoch_)
+               : std::string(reinterpret_cast<const char *>(&header_),
+                             sizeof(header_));
+    int write_size = file_.write(bytes.data(), bytes.size());
     if (write_size != sizeof(header_)) {
       WLOG_ERROR("Wal write header error. create_new[%d]",
                  wal_option.create_new);
+      file_.close();
       return -1;
     }
 
@@ -107,10 +127,23 @@ int LocalWalFile::open(const WalOptions &wal_option) {
     }
 
     // Appends start at the end; prepare_for_read() rewinds readers.
-    file_.seek(0, ailego::File::Origin::End);
+    if (epoch_) {
+      const auto expected = EpochHeader(epoch_);
+      std::string bytes(expected.size(), '\0');
+      if (file_.read(0, bytes.data(), bytes.size()) != bytes.size() ||
+          bytes != expected) {
+        file_.close();
+        return -1;
+      }
+    }
+    if (!file_.seek(0, ailego::File::Origin::End)) {
+      file_.close();
+      return -1;
+    }
   }
 
   max_docs_wal_flush_ = wal_option.max_docs_wal_flush;
+  bytes_ = file_.size();
   read_only_ = wal_option.read_only;
   opened_ = true;
 
@@ -132,7 +165,9 @@ int LocalWalFile::remove() {
     close();
   }
   if (FileHelper::FileExists(wal_path_)) {
-    FileHelper::RemoveFile(wal_path_);
+    if (!FileHelper::RemoveFile(wal_path_)) {
+      return -1;
+    }
     WLOG_INFO("Wal remove success.");
   }
   return 0;
@@ -153,12 +188,18 @@ int LocalWalFile::prepare_for_read() {
   if (!file_.seek(0, ailego::File::Origin::Begin)) {
     return -1;
   }
-  int read_size = file_.read((void *)&header_, sizeof(header_));
+  WalHeader header{};
+  int read_size = file_.read((void *)&header, sizeof(header));
   if (read_size != sizeof(header_)) {
     WLOG_ERROR("Wal read header error.");
     return -1;
   }
-  if (header_.wal_version != 0UL) {
+  if (epoch_) {
+    const auto bytes = std::string_view(reinterpret_cast<const char *>(&header),
+                                        sizeof(header));
+    return bytes == EpochHeader(epoch_) ? 0 : -1;
+  }
+  if (header.wal_version != 0UL) {
     WLOG_ERROR("Wal version not support error.");
     return -1;
   }
@@ -173,6 +214,19 @@ int LocalWalFile::write_record(WalRecord &record) {
   int ret = -1;
 
   std::lock_guard<std::mutex> lock(file_mutex_);
+  if (epoch_) {
+    std::string frame;
+    fts::format::AppendU32(record.length_, &frame);
+    fts::format::AppendU32(~record.length_, &frame);
+    fts::format::AppendU32(record.crc_, &frame);
+    if (file_.write(frame.data(), frame.size()) != frame.size() ||
+        file_.write(record.content_.data(), record.length_) != record.length_) {
+      return -1;
+    }
+    ++docs_count_;
+    bytes_ += frame.size() + static_cast<uint64_t>(record.length_);
+    return 1;
+  }
   do {
     write_size = file_.write((const void *)&record.length_, LENGTH_SIZE);
     if (write_size != LENGTH_SIZE) {
@@ -196,60 +250,81 @@ int LocalWalFile::write_record(WalRecord &record) {
       break;
     }
     ret = 1;  // write one record success
+    bytes_ += LENGTH_SIZE + CRC_SIZE + static_cast<uint64_t>(record.length_);
     docs_count_++;
   } while (false);
 
   return ret;
 }
 
-//! Return 1 if success or 0 if eof or -1 if read error
-int LocalWalFile::read_record(WalRecord &record) {
-  CHECK_STATUS(opened_, true);
-
-  int read_size = 0;
-  std::string err_msg;
-  int ret = -1;
-
-  do {
-    read_size =
-        file_.read(reinterpret_cast<void *>(&record.length_), LENGTH_SIZE);
-    if (read_size == 0) {
-      ret = 0;
-      WLOG_INFO("Wal read finished. end of file");
-      break;
+Result<WalReadResult> LocalWalFile::next_checked() {
+  if (!opened_) {
+    return tl::make_unexpected(Status::FailedPrecondition("WAL is closed"));
+  }
+  using State = WalReadResult::State;
+  const auto offset = file_.offset();
+  const auto size = file_.size();
+  if (offset < 0 || static_cast<uint64_t>(offset) > size) {
+    return tl::make_unexpected(Status::InternalError("Invalid WAL offset"));
+  }
+  const size_t remaining = size - static_cast<size_t>(offset);
+  if (!remaining) {
+    return WalReadResult{State::kEnd, {}};
+  }
+  auto truncated = [&]() {
+    truncated_at_ = static_cast<size_t>(offset);
+    return WalReadResult{State::kTruncatedTail, {}};
+  };
+  const size_t header_size = epoch_ ? 12 : 8;
+  if (remaining < header_size) {
+    return truncated();
+  }
+  char bytes[12];
+  if (file_.read(bytes, header_size) != header_size) {
+    return tl::make_unexpected(Status::InternalError("Short WAL header read"));
+  }
+  uint32_t length, checksum;
+  if (epoch_) {
+    fts::format::Decoder decoder(std::string_view(bytes, header_size));
+    length = decoder.u32();
+    if (decoder.u32() != ~length) {
+      return tl::make_unexpected(
+          Status::InternalError("Invalid WAL frame length"));
     }
+    checksum = decoder.u32();
+  } else {
+    std::memcpy(&length, bytes, sizeof(length));
+    std::memcpy(&checksum, bytes + sizeof(length), sizeof(checksum));
+  }
+  if (length == 0 || length > RecordLimit(epoch_)) {
+    return tl::make_unexpected(
+        Status::InternalError("Invalid WAL record length"));
+  }
+  if (length > remaining - header_size) {
+    return truncated();
+  }
+  std::string record(length, '\0');
+  if (file_.read(record.data(), length) != length) {
+    return tl::make_unexpected(Status::InternalError("Short WAL record read"));
+  }
+  if (ailego::Crc32c::Hash(record.data(), length, 0) != checksum) {
+    return tl::make_unexpected(
+        Status::InternalError("WAL record checksum mismatch"));
+  }
+  return WalReadResult{State::kRecord, std::move(record)};
+}
 
-    if (read_size != LENGTH_SIZE) {
-      WLOG_ERROR("Wal read error. record.length_ error read_size[%d]",
-                 read_size);
-      break;
-    }
-
-    read_size = file_.read(reinterpret_cast<void *>(&record.crc_), CRC_SIZE);
-    if (read_size != CRC_SIZE) {
-      WLOG_ERROR("Wal read error. record.crc_ error read_size[%d]", read_size);
-      break;
-    }
-
-    // resize may crash if record.length_ very large
-    if (record.length_ <= 0 || record.length_ > MAX_RECORD_SIZE) {
-      WLOG_ERROR("Wal read error. record.length_ value error read_size[%d]",
-                 read_size);
-      break;
-    }
-
-    record.content_.resize(record.length_);
-    read_size = file_.read((void *)const_cast<char *>(record.content_.data()),
-                           record.length_);
-    if (read_size != (int)record.length_) {
-      WLOG_ERROR("Wal read error. record.content_ error read_size[%d]",
-                 read_size);
-      break;
-    }
-    ret = 1;  // read one record success
-  } while (false);
-
-  return ret;
+Status LocalWalFile::discard_truncated_tail() {
+  if (read_only_ || !opened_ || !truncated_at_) {
+    return Status::FailedPrecondition("No writable truncated WAL tail");
+  }
+  if (!file_.truncate(*truncated_at_) || !file_.flush() ||
+      !file_.seek(0, ailego::File::Origin::End)) {
+    return Status::InternalError("Cannot repair truncated WAL tail");
+  }
+  bytes_ = *truncated_at_;
+  truncated_at_.reset();
+  return Status::OK();
 }
 
 };  // namespace zvec

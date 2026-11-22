@@ -45,6 +45,14 @@ class TokenFilter {
    */
   virtual std::vector<Token> filter(std::vector<Token> tokens) const = 0;
 
+  virtual Status validate_streaming() const {
+    return Status::NotSupported("Unbounded FTS filter: ", name());
+  }
+  virtual Status filter_one(std::vector<Token> *tokens, size_t) const {
+    *tokens = filter(std::move(*tokens));
+    return Status::OK();
+  }
+
   /*! Return filter name
    */
   virtual const char *name() const = 0;
@@ -57,6 +65,14 @@ using TokenFilterPtr = std::shared_ptr<TokenFilter>;
  */
 class LowercaseTokenFilter : public TokenFilter {
  public:
+  // Deliver an already lowercase token directly from the tokenizer. Reuse a
+  // bounded string across tokens only when a code point actually changes.
+  Status analyze_one(std::string_view text, uint32_t offset, uint32_t position,
+                     size_t budget, std::string *scratch,
+                     const TokenSink &sink) const;
+  Status validate_streaming() const override {
+    return Status::OK();
+  }
   std::vector<Token> filter(std::vector<Token> tokens) const override;
 
   const char *name() const override {

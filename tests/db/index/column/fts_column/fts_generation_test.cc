@@ -20,7 +20,9 @@
 #include "db/common/file_helper.h"
 #include "db/index/column/fts_column/fts_indexer.h"
 #include "db/index/column/fts_column/fts_merge.h"
+#include "db/index/column/fts_column/fts_run.h"
 #include "db/index/column/fts_column/fts_source.h"
+#include "db/index/column/fts_column/fts_writing_index.h"
 
 namespace zvec {
 namespace {
@@ -65,6 +67,116 @@ class FtsGenerationTest : public testing::Test {
   }
 };
 
+TEST_F(FtsGenerationTest, RunDiskChargeFollowsPinsAndFailedDeletion) {
+  bool allow_remove = false;
+  auto queue = fts::FtsRetirementQueue::Create([&](const std::string &) {
+    return allow_remove ? Status::OK()
+                        : Status::InternalError("injected unlink failure");
+  });
+  auto file = queue->track(path_ + "/retained.run", false, true);
+  file->register_run(4096);
+  file->register_run(4096);
+  EXPECT_EQ(4096u, queue->uncheckpointed_bytes());
+  file->preserve();
+  EXPECT_EQ(0u, queue->uncheckpointed_bytes());
+  auto reader = file;
+  file->retire();
+  file->retire();
+  file.reset();
+  EXPECT_EQ(4096u, queue->retired_bytes());
+  EXPECT_EQ(0u, queue->pending());
+  reader.reset();
+  EXPECT_EQ(4096u, queue->retired_bytes());
+  EXPECT_EQ(1u, queue->pending());
+  allow_remove = true;
+  EXPECT_EQ(1u, queue->retry());
+  EXPECT_EQ(0u, queue->retired_bytes());
+}
+
+TEST_F(FtsGenerationTest, WritingLayoutsPreserveLegacyScoresAndPhraseOrder) {
+  CollectionSchema schema("layouts");
+  ASSERT_TRUE(schema.add_field(fields_.front()).ok());
+  auto legacy = FtsIndexer::CreateAndOpen(path_ + "/reference",
+                                          schema.fts_fields(), true);
+  ASSERT_TRUE(legacy);
+  auto phrase = std::make_unique<fts::PhraseNode>();
+  phrase->terms = {"hot", "hot"};
+  auto combination = std::make_unique<fts::AndNode>();
+  combination->children.push_back(std::make_unique<fts::TermNode>("hot"));
+  combination->children.push_back(
+      std::make_unique<fts::TermNode>("other", false, true));
+  auto either = std::make_unique<fts::OrNode>();
+  either->children.push_back(std::make_unique<fts::TermNode>("hot"));
+  either->children.push_back(std::make_unique<fts::TermNode>("rare"));
+  std::vector<fts::FtsAstNodePtr> queries;
+  queries.push_back(std::make_unique<fts::TermNode>("hot"));
+  queries.push_back(std::move(phrase));
+  queries.push_back(std::move(combination));
+  queries.push_back(std::move(either));
+  const std::vector<std::optional<std::string_view>> values{
+      "hot hot rare", "hot other",    "",          std::nullopt,
+      "hot",          "hot rare hot", "other rare"};
+  for (bool mmap : {false, true}) {
+    auto retirement = fts::FtsRetirementQueue::Create();
+    fts::FtsWritingOptions limits;
+    limits.active_bytes = 1u << 20;
+    limits.soft_runs = 3;
+    limits.hard_runs = 4;
+    auto writer = fts::FtsWritingIndex::Open(
+        path_, 3, 7, mmap, schema, retirement,
+        std::make_shared<fts::FtsReadBudget>(8u << 20), limits);
+    ASSERT_TRUE(writer) << writer.error().message();
+    for (uint32_t row = 0; row < 180; ++row) {
+      const auto &v = values[(row * 17u + row / 13) % values.size()];
+      auto pending = (*writer)->prepare({v});
+      ASSERT_TRUE(pending) << pending.error().message();
+      (*writer)->apply(**pending);
+      if (!mmap && v) {
+        ASSERT_TRUE(legacy->insert("title", row, std::string(*v)).ok());
+      }
+      if ((row + (mmap ? 2 : 0)) % 13 == 0 || row % 43 == 0) {
+        auto status = (*writer)->flush();
+        ASSERT_TRUE(status.ok()) << status.message();
+      }
+    }
+    ASSERT_GT((*writer)->merge_count(), 1u);
+    auto check = [&](fts::FtsWritingIndex &index) {
+      auto reader = index.reader("title");
+      ASSERT_TRUE(reader) << reader.error().message();
+      for (const auto &query : queries) {
+        SCOPED_TRACE(query->text());
+        const std::vector<IndexFilter::Ptr> filters{
+            nullptr,
+            EasyIndexFilter::Create([](uint64_t id) { return id < 4; }),
+            EasyIndexFilter::Create([](uint64_t id) { return id % 17 != 0; })};
+        for (const auto &filter : filters) {
+          fts::FtsQueryParams params;
+          params.filter = filter;
+          auto expected = legacy->get("title")->search(*query, params);
+          auto actual = (*reader)->search(*query, params);
+          ASSERT_TRUE(expected && actual);
+          ASSERT_EQ(expected->size(), actual->size());
+          for (size_t i = 0; i < actual->size(); ++i) {
+            EXPECT_EQ(expected->at(i).doc_id, actual->at(i).doc_id);
+            EXPECT_EQ(expected->at(i).score, actual->at(i).score);
+          }
+        }
+      }
+    };
+    check(**writer);
+    auto root = (*writer)->checkpoint(1);
+    ASSERT_TRUE(root) << root.error().message();
+    (*writer)->publish_checkpoint();
+    writer->reset();
+    writer = fts::FtsWritingIndex::Open(
+        path_, 3, 7, mmap, schema, retirement,
+        std::make_shared<fts::FtsReadBudget>(8u << 20), limits, &*root);
+    ASSERT_TRUE(writer) << writer.error().message();
+    check(**writer);
+    (*writer)->retire_checkpoint();
+  }
+}
+
 TEST_F(FtsGenerationTest,
        DirectSealPreservesFieldsScoresAndSourceAcrossReopen) {
   auto retirement = fts::FtsRetirementQueue::Create();
@@ -101,6 +213,62 @@ TEST_F(FtsGenerationTest,
   // Conversion must retain the mutable source's auxiliary CFs for retry.
   EXPECT_TRUE(source_->insert("title", 3, "later").ok());
   EXPECT_TRUE(source_->flush().ok());
+}
+
+TEST_F(FtsGenerationTest, RunSealChecksTemporaryBudgetAndSourceOrder) {
+  auto retirement = fts::FtsRetirementQueue::Create();
+  auto read_budget = std::make_shared<fts::FtsReadBudget>(64u << 20);
+  auto original = source_->prepare_custom(target(), fields_, retirement);
+  ASSERT_TRUE(original);
+  using Sources = std::vector<std::vector<fts::FtsFieldSource::Ptr>>;
+  Sources sources;
+  for (const auto &field : fields_) {
+    auto source = (*original)->open_source(field->name(), 3);
+    ASSERT_TRUE(source);
+    sources.push_back({std::move(*source)});
+  }
+  const auto writer = fts::NewFtsIdentity();
+  auto first = fts::FtsRun::Write(path_, false, 3, 7, 0, sources, retirement,
+                                  read_budget, writer);
+  auto second = fts::FtsRun::Write(path_, false, 3, 7, 3, sources, retirement,
+                                   read_budget, writer);
+  ASSERT_TRUE(first && second);
+  auto single = FtsIndexer::PrepareRunSeal(target(), fields_, **first, writer,
+                                           retirement, {}, 1);
+  ASSERT_FALSE(single);
+  EXPECT_EQ(single.error().code(), StatusCode::RESOURCE_EXHAUSTED);
+  Sources runs;
+  for (size_t ordinal = 0; ordinal < fields_.size(); ++ordinal) {
+    auto left = (*first)->source(ordinal);
+    auto right = (*second)->source(ordinal);
+    ASSERT_TRUE(left && right);
+    runs.push_back({std::move(*left), std::move(*right)});
+  }
+  auto wrong_writer =
+      fts::FtsRun::Write(path_, false, 3, 7, 0, runs, retirement, read_budget,
+                         fts::NewFtsIdentity());
+  ASSERT_FALSE(wrong_writer);
+  EXPECT_EQ(wrong_writer.error().code(), StatusCode::INVALID_ARGUMENT);
+  auto seal = [&](uint64_t budget) {
+    auto source = [&](size_t run, const FieldSchema::Ptr &field) {
+      return runs[std::find(fields_.begin(), fields_.end(), field) - fields_.begin()][run];
+    };
+    return FtsIndexer::PrepareMerged(target(false, 6), fields_, 2, source, {},
+                                     fts::FtsMergePolicy::kCoalesceRuns,
+                                     retirement, {}, budget);
+  };
+  auto insufficient = seal(1);
+  ASSERT_FALSE(insufficient);
+  EXPECT_EQ(insufficient.error().code(), StatusCode::RESOURCE_EXHAUSTED);
+  auto sealed = seal(16u << 20);
+  ASSERT_TRUE(sealed);
+  EXPECT_GT((*sealed)->spool_stats().read_bytes, 0u);
+  EXPECT_GT((*sealed)->spool_stats().written_bytes, 0u);
+  EXPECT_LE((*sealed)->spool_stats().peak_reserved_bytes, 16u << 20);
+  std::swap(runs[0][0], runs[0][1]);
+  auto out_of_order = seal(16u << 20);
+  ASSERT_FALSE(out_of_order);
+  EXPECT_EQ(out_of_order.error().code(), StatusCode::INVALID_ARGUMENT);
 }
 
 TEST_F(FtsGenerationTest,

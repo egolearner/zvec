@@ -23,13 +23,17 @@
 
 namespace zvec::fts {
 
+class FtsSpool;
+class FtsSpoolWorkspace;
+
 // Low-level section writer for a PREPARED container. The caller supplies an
 // already-created private dumper and retains responsibility for fsync, unique
 // naming, publication and cleanup. This never commits a database version.
 class FtsContainerWriter {
  public:
   static Result<std::unique_ptr<FtsContainerWriter>> Create(
-      core::IndexDumper::Pointer dumper, uint32_t layout_granule = 4096);
+      core::IndexDumper::Pointer dumper, uint32_t layout_granule = 4096,
+      std::shared_ptr<FtsSpoolWorkspace> workspace = {});
   ~FtsContainerWriter();
   FtsContainerWriter(const FtsContainerWriter &) = delete;
   FtsContainerWriter &operator=(const FtsContainerWriter &) = delete;
@@ -39,17 +43,22 @@ class FtsContainerWriter {
   Status end_section();
   // sections must be empty; the writer supplies lengths/checksum references.
   Status finish(const format::Metadata &metadata);
+  const std::shared_ptr<FtsSpoolWorkspace> &workspace() const {
+    return workspace_;
+  }
 
  private:
   FtsContainerWriter(core::IndexDumper::Pointer dumper, uint32_t granule,
-                     std::FILE *spool);
+                     std::unique_ptr<FtsSpool> spool,
+                     std::shared_ptr<FtsSpoolWorkspace> workspace);
   Status checksum_chunk();
   Status checksum_page();
   Status write_bytes(std::string_view bytes);
 
   core::IndexDumper::Pointer dumper_;
   uint32_t granule_;
-  std::FILE *spool_;
+  std::unique_ptr<FtsSpool> spool_;
+  std::shared_ptr<FtsSpoolWorkspace> workspace_;
   uint64_t output_size_{0};
   std::vector<format::SectionMetadata> sections_;
   std::string active_name_;
@@ -66,6 +75,18 @@ class FtsContainerWriter {
 };
 
 class FtsContainerReader;
+
+// Shared by every generation of one writing index, including retired files
+// that are still pinned. Acquisition never waits while holding a query lock.
+class FtsReadBudget {
+ public:
+  explicit FtsReadBudget(size_t bytes) : limit_(bytes) {}
+
+ private:
+  friend class FtsContainerReader;
+  const size_t limit_;
+  std::atomic<size_t> used_{0};
+};
 
 // A range pins its file owner as well as the native storage's data handle.
 // Reuse view() while this handle lives; no storage close is exposed to callers.
@@ -104,15 +125,22 @@ class FtsContainerReader
   static Result<Pointer> Open(const std::string &path, bool enable_mmap,
                               size_t read_budget = 1024 * 1024,
                               std::shared_ptr<void> file_owner = {});
+  static Result<Pointer> Open(const std::string &path, bool enable_mmap,
+                              std::shared_ptr<FtsReadBudget> read_budget,
+                              std::shared_ptr<void> file_owner);
+  // A single-field merge scans each of eight sections in dictionary order.
+  // Keep one charged read window per section across successive term cursors.
+  // The windows die with this scan and never enter the query-facing reader.
+  Pointer scan_view();
   bool paged_queries() const {
-    return buffer_pool_;
+    return buffer_pool_ && !scan_base_;
   }
   const format::Metadata &metadata() const {
-    return metadata_;
+    return scan_base_ ? scan_base_->metadata_ : metadata_;
   }
   // Digest of exact persisted metadata, including unknown optional records.
   const format::Digest &metadata_digest() const {
-    return metadata_digest_;
+    return scan_base_ ? scan_base_->metadata_digest_ : metadata_digest_;
   }
   Result<FtsReadRange> read(const std::string &section, uint64_t offset,
                             uint64_t length);
@@ -126,6 +154,9 @@ class FtsContainerReader
     uint64_t hashed_bytes;
   };
   ReadStats read_stats() const {
+    if (scan_base_) {
+      return scan_base_->read_stats();
+    }
     return {range_reads_.load(std::memory_order_relaxed),
             verified_pages_.load(std::memory_order_relaxed),
             hashed_bytes_.load(std::memory_order_relaxed)};
@@ -138,14 +169,18 @@ class FtsContainerReader
   Result<std::shared_ptr<Lease>> reserve(size_t bytes);
   Status verify_chunk(const format::SectionMetadata &meta, uint64_t chunk,
                       std::string_view bytes);
+  Result<FtsReadRange> scan_range(const std::string &section, uint64_t offset,
+                                  uint64_t length);
+  struct ScanWindows;
+  Pointer scan_base_;
+  std::shared_ptr<ScanWindows> scan_windows_;
 
   // Declaration order is intentional: storage must close before retirement.
   std::shared_ptr<void> file_owner_;
   core::IndexStorage::Pointer storage_;
   core::IndexStorage::Segment::Pointer checksums_;
   format::Metadata metadata_;
-  size_t budget_{0};
-  std::atomic<size_t> reserved_{0};
+  std::shared_ptr<FtsReadBudget> budget_;
   format::Digest metadata_digest_{};
   std::atomic<uint64_t> range_reads_{0};
   std::atomic<uint64_t> verified_pages_{0};

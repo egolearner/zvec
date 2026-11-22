@@ -29,5 +29,7 @@ using EmbeddedJiebaHmmModel = std::shared_ptr<const cppjieba::HMMModel>;
 // is immutable and shared; the decompressed text is released after parsing.
 Result<EmbeddedJiebaDict> get_embedded_jieba_dict();
 Result<EmbeddedJiebaHmmModel> get_embedded_jieba_hmm_model();
+size_t embedded_jieba_dict_input_bytes();
+size_t embedded_jieba_hmm_input_bytes();
 
 }  // namespace zvec::fts

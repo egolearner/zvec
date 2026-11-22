@@ -305,6 +305,61 @@ Result<std::shared_ptr<fts::TokenizerPipeline>> AcquireFtsPipeline(
   return st.pipeline;
 }
 
+Result<std::shared_ptr<fts::TokenizerPipeline>> AcquireFtsWritingPipeline(
+    FtsIndexParams &params) {
+  if (params.tokenizer_name() != "jieba") {
+    return AcquireFtsPipeline(params);
+  }
+  auto lease = fts::TokenizerFactory::reserve_model(to_internal(params));
+  if (!lease) {
+    return tl::make_unexpected(lease.error());
+  }
+  auto pipeline = AcquireFtsPipeline(params);
+  if (pipeline) {
+    (*pipeline)->retain_model(std::move(*lease));
+  }
+  return pipeline;
+}
+
+Result<size_t> FtsAnalysisMetadataBytes(const FieldSchemaPtrList &fields,
+                                        size_t fixed_bytes, size_t limit) {
+  size_t total = fixed_bytes;
+  auto charge = [&](size_t count, size_t size) {
+    if (total > limit || count > (limit - total) / size) {
+      return false;
+    }
+    total += count * size;
+    return true;
+  };
+  for (const auto &field : fields) {
+    auto *params =
+        field ? dynamic_cast<FtsIndexParams *>(field->index_params().get())
+              : nullptr;
+    if (!params) {
+      return tl::make_unexpected(
+          Status::InvalidArgument("Missing FTS analysis configuration"));
+    }
+    // EncodeIndexParams builds a nested message and its final string.
+    // Include simultaneous old/new capacities during string growth.
+    bool fits = charge(field->name().size(), 4) &&
+                charge(params->tokenizer_name().size(), 4) &&
+                charge(params->extra_params().size(), 4) &&
+                charge(params->filters().size(), 128);
+    for (const auto &filter : params->filters()) {
+      if (!fits || !charge(filter.size(), 4)) {
+        fits = false;
+        break;
+      }
+    }
+    if (!fits) {
+      return tl::make_unexpected(
+          Status{StatusCode::RESOURCE_EXHAUSTED,
+                 "FTS analysis metadata budget exhausted"});
+    }
+  }
+  return total;
+}
+
 }  // namespace detail
 
 }  // namespace zvec

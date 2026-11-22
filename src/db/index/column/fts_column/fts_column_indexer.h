@@ -111,6 +111,9 @@ class FtsColumnIndexer {
   // Open an immutable custom field; its generation remains pinned by queries.
   Result<void> open_reader(FtsFieldReader::Pointer reader);
 
+  Result<void> open_reader(std::string field_name,
+                           FtsSegmentReader::Ptr reader);
+
   /*! Release all CF pointers and reset internal state.
    *  An owned context is released after its last reader. Borrowed contexts
    *  must outlive this indexer and all queries using it.

@@ -31,6 +31,8 @@ namespace zvec {
 namespace fts {
 class FtsRetirementQueue;
 class FtsFileOwner;
+class FtsReadBudget;
+class FtsWriteBudget;
 }  // namespace fts
 
 class Version {
@@ -49,6 +51,18 @@ class Version {
 
   bool requires_commit_record() const {
     return requires_commit_record_;
+  }
+
+  bool writing_protocol() const {
+    return writing_protocol_;
+  }
+
+  bool use_fts_runs() const {
+    return use_fts_runs_;
+  }
+
+  void set_use_fts_runs(bool value) {
+    use_fts_runs_ = value;
   }
 
  public:
@@ -186,7 +200,9 @@ class Version {
   std::shared_ptr<fts::FtsFileOwner> manifest_owner_;
   std::shared_ptr<fts::FtsFileOwner> delete_owner_;
   bool requires_commit_record_{false};
+  bool writing_protocol_{false};
   bool bootstrap_baseline_{false};
+  bool use_fts_runs_{false};
   CollectionSchema::Ptr schema_;
   bool enable_mmap_{false};
 
@@ -255,6 +271,19 @@ class VersionManager {
   const std::shared_ptr<fts::FtsRetirementQueue> &fts_retirement() const {
     return fts_retirement_;
   }
+  const std::shared_ptr<fts::FtsReadBudget> &fts_read_budget() const {
+    return fts_read_budget_;
+  }
+  const std::shared_ptr<fts::FtsWriteBudget> &fts_write_budget() const {
+    return fts_write_budget_;
+  }
+  // Set once during exclusive creation or recovery, before segment opens.
+  void select_fts_runs(bool enabled) {
+    use_fts_runs_ = enabled;
+  }
+  bool use_fts_runs() const {
+    return use_fts_runs_;
+  }
 
   void set_id_map_path_suffix(uint32_t suffix) {
     std::lock_guard lock(mtx_);
@@ -309,6 +338,9 @@ class VersionManager {
   bool explicit_authority_{false};
   bool requires_recovery_{false};
   std::shared_ptr<fts::FtsRetirementQueue> fts_retirement_;
+  std::shared_ptr<fts::FtsReadBudget> fts_read_budget_;
+  std::shared_ptr<fts::FtsWriteBudget> fts_write_budget_;
+  bool use_fts_runs_{false};
 };
 
 }  // namespace zvec

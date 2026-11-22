@@ -250,4 +250,58 @@ std::vector<Token> NGramTokenizer::tokenize(const std::string &text) const {
   return tokens;
 }
 
+Status NGramTokenizer::analyze_to(std::string_view text, const TokenSink &sink,
+                                  size_t) const {
+  const auto *data = reinterpret_cast<const uint8_t *>(text.data());
+  auto decode = [&](size_t offset) {
+    int32_t cp = 0;
+    size_t bytes = 1;
+    bool valid = decode_utf8_codepoint(data, text.size(), offset, &cp, &bytes);
+    return UnicodeCodepoint{cp, static_cast<uint32_t>(offset),
+                            static_cast<uint32_t>(offset + bytes), valid};
+  };
+  size_t begin = 0, end = 0;
+  uint32_t count = 0;
+  uint64_t position = 0;
+  while (begin < text.size()) {
+    while (end < text.size() && count < ngram_min_) {
+      auto cp = decode(end);
+      end = cp.end;
+      if (is_ngram_token_char(cp, token_char_mask_)) {
+        ++count;
+      } else {
+        begin = end;
+        count = 0;
+      }
+    }
+    if (count < ngram_min_) {
+      break;
+    }
+    auto emit = [&](size_t last) {
+      if (position > UINT32_MAX) {
+        return Status::InvalidArgument("NGram position exceeds uint32");
+      }
+      return sink(text.substr(begin, last - begin),
+                  static_cast<uint32_t>(begin),
+                  static_cast<uint32_t>(position++));
+    };
+    auto status = emit(end);
+    if (!status.ok()) {
+      return status;
+    }
+    if (ngram_max_ != ngram_min_ && end < text.size()) {
+      auto cp = decode(end);
+      if (is_ngram_token_char(cp, token_char_mask_)) {
+        status = emit(cp.end);
+        if (!status.ok()) {
+          return status;
+        }
+      }
+    }
+    begin = decode(begin).end;
+    --count;
+  }
+  return Status::OK();
+}
+
 }  // namespace zvec::fts

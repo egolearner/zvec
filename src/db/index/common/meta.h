@@ -53,6 +53,36 @@ struct FtsBaseDescriptor {
   }
 };
 
+struct FtsRunDescriptor {
+  std::array<uint8_t, 16> id{};
+  std::array<uint8_t, 32> metadata_digest{};
+  uint64_t generation{0};
+  uint64_t file_size{0};
+  uint32_t parent_begin{0};
+  uint32_t rows{0};
+
+  bool operator==(const FtsRunDescriptor &other) const {
+    return id == other.id && metadata_digest == other.metadata_digest &&
+           generation == other.generation && file_size == other.file_size &&
+           parent_begin == other.parent_begin && rows == other.rows;
+  }
+};
+
+struct FtsWritingDescriptor {
+  static constexpr size_t kMaxRuns = 16;
+  uint64_t wal_epoch{0};
+  uint32_t row_frontier{0};
+  std::array<uint8_t, 32> schema_identity{};
+  std::array<uint8_t, 16> writer_id{};
+  std::vector<FtsRunDescriptor> runs;
+
+  bool operator==(const FtsWritingDescriptor &other) const {
+    return wal_epoch == other.wal_epoch && row_frontier == other.row_frontier &&
+           schema_identity == other.schema_identity &&
+           writer_id == other.writer_id && runs == other.runs;
+  }
+};
+
 class BlockMeta {
  public:
   using Ptr = std::shared_ptr<BlockMeta>;
@@ -143,7 +173,8 @@ class BlockMeta {
     return id_ == other.id_ && type_ == other.type_ &&
            min_doc_id_ == other.min_doc_id_ &&
            max_doc_id_ == other.max_doc_id_ && columns_ == other.columns_ &&
-           doc_count_ == other.doc_count_ && fts_base_ == other.fts_base_;
+           doc_count_ == other.doc_count_ && fts_base_ == other.fts_base_ &&
+           fts_writing_ == other.fts_writing_;
   }
 
   std::string to_string() const {
@@ -197,6 +228,7 @@ class BlockMeta {
   uint32_t doc_count_{0};
   std::vector<std::string> columns_{};
   std::optional<FtsBaseDescriptor> fts_base_;
+  std::optional<FtsWritingDescriptor> fts_writing_;
 };
 
 class SegmentMeta {
@@ -207,6 +239,15 @@ class SegmentMeta {
   SegmentMeta() = default;
 
   explicit SegmentMeta(SegmentID id) : id_(id) {}
+
+  const FtsWritingDescriptor *writing_fts_checkpoint() const {
+    for (const auto &block : persisted_blocks_) {
+      if (block.fts_writing_) {
+        return &*block.fts_writing_;
+      }
+    }
+    return nullptr;
+  }
 
   void set_id(SegmentID id) {
     id_ = id;

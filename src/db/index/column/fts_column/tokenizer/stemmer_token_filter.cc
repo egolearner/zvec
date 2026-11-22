@@ -13,8 +13,10 @@
 // limitations under the License.
 
 #include "stemmer_token_filter.h"
+#include <climits>
 #include <unordered_map>
 #include <zvec/ailego/logger/logger.h>
+#include "snowball_workspace.h"
 
 extern "C" {
 #include <libstemmer.h>
@@ -75,6 +77,51 @@ std::vector<Token> StemmerTokenFilter::filter(std::vector<Token> tokens) const {
     }
   }
   return tokens;
+}
+
+Status StemmerTokenFilter::validate_streaming() const {
+  return Status::OK();
+}
+
+Status StemmerTokenFilter::filter_one(std::vector<Token> *tokens,
+                                      size_t budget) const {
+  auto &token = tokens->front();
+  // Each 3.1.1 algorithm creates a fixed scalar environment and at most
+  // two tiny initial strings. All subsequent string growth (including the
+  // auxiliary string in Danish, Dutch and Finnish) uses increase_size().
+  if (budget < 4096 || token.text.size() > INT_MAX) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            "Cannot reserve Snowball workspace"};
+  }
+  size_t remaining = budget - 4096;
+  struct RestoreBudget {
+    size_t *previous;
+    ~RestoreBudget() {
+      zvec_fts_set_snowball_budget(previous);
+    }
+  } scope{zvec_fts_set_snowball_budget(&remaining)};
+  // Scope Snowball's mutable environment to this reservation. The legacy
+  // batch API can keep a thread-local cache larger than this writer's budget.
+  std::unique_ptr<sb_stemmer, decltype(&sb_stemmer_delete)> stemmer(
+      sb_stemmer_new(language_.c_str(), nullptr), &sb_stemmer_delete);
+  if (!stemmer) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            "Cannot reserve Snowball workspace"};
+  }
+  const auto *word = sb_stemmer_stem(
+      stemmer.get(), reinterpret_cast<const unsigned char *>(token.text.data()),
+      static_cast<int>(token.text.size()));
+  if (!word) {
+    return {StatusCode::RESOURCE_EXHAUSTED, "Snowball workspace exhausted"};
+  }
+  const size_t result_bytes =
+      static_cast<size_t>(sb_stemmer_length(stemmer.get()));
+  if (result_bytes > budget / 4) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            "Snowball output exceeds filter workspace"};
+  }
+  token.text.assign(reinterpret_cast<const char *>(word), result_bytes);
+  return Status::OK();
 }
 
 }  // namespace zvec::fts

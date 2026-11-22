@@ -78,6 +78,12 @@ class FileHelper {
         path, seg_id, ailego::StringHelper::Concat(block_id, ".wal"));
   }
 
+  static std::string MakeWalEpochPath(const std::string &seg_path,
+                                      uint64_t epoch) {
+    return ailego::FileHelper::PathJoin(
+        seg_path, ailego::StringHelper::Concat("wal.epoch.", epoch));
+  }
+
   static std::string MakeSegmentPath(const std::string &path, uint32_t id,
                                      const std::string &suffix = "") {
     if (suffix.empty()) {
@@ -159,6 +165,10 @@ class FileHelper {
   static std::string MakeCustomFtsPath(const std::string &seg_path,
                                        uint32_t block_id, uint64_t generation,
                                        const std::array<uint8_t, 16> &base_id);
+
+  static std::string MakeFtsRunPath(const std::string &seg_path,
+                                    uint32_t block_id, uint64_t generation,
+                                    const std::array<uint8_t, 16> &id);
 
   static const std::string MakeVectorIndexPath(const std::string &path,
                                                const std::string &column,

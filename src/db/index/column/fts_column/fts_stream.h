@@ -14,15 +14,63 @@
 
 #pragma once
 
+#include <algorithm>
 #include "fts_container.h"
 
 namespace zvec::fts {
+
+// Successful logical stdio calls on the private section spools. The peak
+// includes the candidate container and its reserved framing in the same job.
+struct FtsSpoolStats {
+  uint64_t read_bytes{0}, written_bytes{0}, peak_reserved_bytes{0};
+
+  void add(const FtsSpoolStats &job) {
+    read_bytes += job.read_bytes;
+    written_bytes += job.written_bytes;
+    peak_reserved_bytes =
+        std::max(peak_reserved_bytes, job.peak_reserved_bytes);
+  }
+};
+
+// One encoding job owns this private directory and a slice of the collection
+// disk budget. The containing job removes the directory on every exit path.
+class FtsSpoolWorkspace {
+ public:
+  FtsSpoolWorkspace(std::string directory, uint64_t bytes, uint32_t files)
+      : directory_(std::move(directory)),
+        limit_(bytes),
+        bytes_left_(bytes),
+        files_left_(files) {}
+  const FtsSpoolStats &stats() const {
+    return stats_;
+  }
+
+ private:
+  friend class FtsSpool;
+  friend class FtsContainerWriter;
+  bool take(uint64_t bytes) {
+    if (bytes > bytes_left_) {
+      return false;
+    }
+    bytes_left_ -= bytes;
+    stats_.peak_reserved_bytes =
+        std::max(stats_.peak_reserved_bytes, limit_ - bytes_left_);
+    return true;
+  }
+  std::string directory_;
+  const uint64_t limit_;
+  FtsSpoolStats stats_;
+  uint64_t bytes_left_;
+  uint32_t files_left_;
+  uint64_t next_file_{0};
+};
 
 // Private candidate workspace. All offsets are checked before platform casts;
 // temporary bytes are never a committed database file. I/O failure is sticky.
 class FtsSpool {
  public:
-  static Result<std::unique_ptr<FtsSpool>> Create();
+  static Result<std::unique_ptr<FtsSpool>> Create(
+      const std::shared_ptr<FtsSpoolWorkspace> &workspace = {});
   ~FtsSpool();
   FtsSpool(const FtsSpool &) = delete;
   FtsSpool &operator=(const FtsSpool &) = delete;
@@ -39,6 +87,9 @@ class FtsSpool {
   explicit FtsSpool(std::FILE *file) : file_(file) {}
   Status seek(uint64_t offset, bool writing);
   std::FILE *file_;
+  std::shared_ptr<FtsSpoolWorkspace> workspace_;
+  std::string path_;
+  uint64_t charged_{0};
   uint64_t size_{0};
   uint64_t position_{0};
   bool writing_{true};

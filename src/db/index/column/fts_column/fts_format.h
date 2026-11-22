@@ -118,10 +118,13 @@ struct SectionMetadata {
   uint64_t first_checksum{0};
 };
 
+constexpr uint64_t kRunLocalDocids = 1;
+
 // Container-local metadata, NOT a collection manifest or commit marker.
-// v1 fixes parent-segment-local DocIDs, legacy_compatible statistics, unsigned
-// byte term ordering, SHA-256 and codec version 1. These identities are encoded
-// explicitly and rejected when unsupported rather than silently defaulted.
+// Sealed v1 fixes parent-segment-local DocIDs, legacy_compatible statistics,
+// unsigned byte term ordering, SHA-256 and codec version 1. These identities
+// are encoded explicitly and rejected when unsupported rather than silently
+// defaulted.
 struct Metadata {
   uint32_t minor_version{0};
   uint64_t required_features{0};
@@ -131,6 +134,8 @@ struct Metadata {
   uint32_t block_id{0};
   uint64_t source_segment_id{0};
   uint64_t row_count{0};
+  // Present only for a writing run. Its local rows start at zero.
+  std::optional<uint64_t> parent_row_begin;
   uint32_t layout_granule{4096};
   std::vector<FieldMetadata> fields;
   std::vector<SectionMetadata> sections;

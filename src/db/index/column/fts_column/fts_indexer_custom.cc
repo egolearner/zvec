@@ -18,9 +18,11 @@
 #include <rocksdb/env.h>
 #include <zvec/core/framework/index_factory.h>
 #include "db/common/file_helper.h"
+#include "db/common/typedef.h"
 #include "db/index/common/manifest_codec.h"
 #include "fts_indexer.h"
 #include "fts_mutable_snapshot.h"
+#include "fts_run.h"
 
 namespace zvec {
 namespace {
@@ -156,7 +158,8 @@ Result<FtsIndexer::Ptr> FtsIndexer::prepare_custom(
 Result<FtsIndexer::Ptr> FtsIndexer::PrepareGeneration(
     const CustomTarget &target, const FieldSchemaPtrList &fields,
     const fts::FtsRetirementQueue::Pointer &retirement,
-    const FieldBuilder &build, const DurableFile::Hook &hook) {
+    const FieldBuilder &build, const DurableFile::Hook &hook,
+    std::optional<uint64_t> temporary_bytes) {
   auto status = ValidateFields(target, fields);
   if (!status.ok()) {
     return tl::make_unexpected(status);
@@ -203,13 +206,16 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareGeneration(
   }
   // Keep the writer's native handle inside this scope so failure cleanup and
   // pre-opening only run after it closes (including on Windows).
+  auto workspace = temporary_bytes ? std::make_shared<fts::FtsSpoolWorkspace>(
+                                         reservation_path, *temporary_bytes, 16)
+                                   : nullptr;
   {
     auto dumper = core::IndexFactory::CreateDumper("FileDumper");
     if (!dumper || dumper->create(pending_path) != 0) {
       return tl::make_unexpected(
           Status{StatusCode::UNAVAILABLE, "Cannot create FTS candidate"});
     }
-    auto writer = fts::FtsContainerWriter::Create(dumper);
+    auto writer = fts::FtsContainerWriter::Create(dumper, 4096, workspace);
     if (!writer) {
       return tl::make_unexpected(writer.error());
     }
@@ -251,6 +257,9 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareGeneration(
     return prepared;
   }
   (*prepared)->working_dir_ = final_path;
+  if (workspace) {
+    (*prepared)->spool_stats_ = workspace->stats();
+  }
   auto published = DurableFile::PublishPrepared(pending_path, final_path, hook);
   if (!published.status.ok()) {
     // No manifest can reference this private candidate yet. Even a data-file
@@ -289,7 +298,7 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareMerged(
     size_t segment_count, const OpenMergeSource &open_source,
     const roaring::Roaring &deletions, fts::FtsMergePolicy policy,
     const fts::FtsRetirementQueue::Pointer &retirement,
-    const DurableFile::Hook &hook) {
+    const DurableFile::Hook &hook, uint64_t temporary_bytes) {
   if (!open_source || segment_count == 0 ||
       (policy == fts::FtsMergePolicy::kRewrite &&
        (segment_count != 1 || !deletions.isEmpty()))) {
@@ -319,6 +328,18 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareMerged(
             return tl::make_unexpected(
                 Status::InvalidArgument("Incompatible FTS source row count"));
           }
+          if (policy == fts::FtsMergePolicy::kCoalesceRuns &&
+              target.block.doc_count() != 0) {
+            const auto &metadata = (*source)->metadata();
+            if (!fts::FtsRun::SourceMatches(**source, target.segment_id,
+                                            target.block.id(), rows, ordinal) ||
+                (!sources.empty() &&
+                 (sources.front()->metadata().id != metadata.id ||
+                  sources.front()->metadata().incarnation != metadata.incarnation))) {
+              return tl::make_unexpected(
+                  Status::InvalidArgument("Incompatible FTS seal run"));
+            }
+          }
           segment_rows[i] = count;
           rows += count;
           sources.push_back(std::move(*source));
@@ -328,7 +349,7 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareMerged(
           return tl::make_unexpected(Status::InvalidArgument(
               "FTS target disagrees with forward rows"));
         }
-        if (policy == fts::FtsMergePolicy::kRewrite) {
+        if (policy != fts::FtsMergePolicy::kCompact) {
           const auto &source = sources.front()->metadata();
           // Unchanged custom fields keep their logical incarnation. A
           // legacy field has no persisted identity and gets a fresh one.
@@ -340,7 +361,70 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareMerged(
         return fts::MergeFtsField(sources, deletions, policy,
                                   std::move(identity), writer, ordinal);
       },
-      hook);
+      hook,
+      policy == fts::FtsMergePolicy::kCoalesceRuns
+          ? std::optional<uint64_t>{temporary_bytes}
+          : std::nullopt);
+}
+
+Result<FtsIndexer::Ptr> FtsIndexer::PrepareRunSeal(
+    const CustomTarget &target, const FieldSchemaPtrList &fields,
+    const fts::FtsRun &run, const fts::format::Identity &writer_id,
+    const fts::FtsRetirementQueue::Pointer &retirement,
+    const DurableFile::Hook &hook, uint64_t temporary_bytes) {
+  auto status = ValidateFields(target, fields);
+  if (!status.ok()) {
+    return tl::make_unexpected(status);
+  }
+  const auto &container = run.container();
+  const auto &meta = container->metadata();
+  if (run.begin() != 0 || run.rows() != target.block.doc_count() ||
+      meta.source_segment_id != target.segment_id ||
+      meta.block_id != target.block.id() ||
+      meta.fields.size() != fields.size() ||
+      meta.sections.size() != 8 * fields.size() ||
+      meta.optional_features != 0 || meta.layout_granule != 4096) {
+    return tl::make_unexpected(
+        Status::InvalidArgument("Incompatible single-run seal target"));
+  }
+  for (uint32_t f = 0; f < fields.size(); ++f) {
+    if (!run.matches_field(f, fields[f]->name(), AnalysisIdentity(*fields[f]),
+                           writer_id) ||
+        meta.fields[f].dictionary_generation == UINT64_MAX) {
+      return tl::make_unexpected(
+          Status::InvalidArgument("Incompatible single-run seal field"));
+    }
+  }
+  return PrepareGeneration(
+      target, fields, retirement,
+      [&](fts::format::FieldMetadata, fts::FtsContainerWriter *out,
+          uint32_t ordinal) -> Result<fts::format::FieldMetadata> {
+        const auto prefix = "field." + std::to_string(ordinal) + ".";
+        for (const auto &section : meta.sections) {
+          if (section.name.compare(0, prefix.size(), prefix) != 0) {
+            continue;
+          }
+          auto copied = out->begin_section(section.name);
+          CHECK_RETURN_STATUS_EXPECTED(copied);
+          for (uint64_t offset = 0; offset < section.length;) {
+            const auto size =
+                std::min<uint64_t>(65536, section.length - offset);
+            auto bytes = container->read(section.name, offset, size);
+            if (!bytes) {
+              return tl::make_unexpected(bytes.error());
+            }
+            copied = out->append(bytes->view());
+            CHECK_RETURN_STATUS_EXPECTED(copied);
+            offset += size;
+          }
+          copied = out->end_section();
+          CHECK_RETURN_STATUS_EXPECTED(copied);
+        }
+        auto field = meta.fields[ordinal];
+        ++field.dictionary_generation;
+        return field;
+      },
+      hook, temporary_bytes);
 }
 
 Result<FtsIndexer::Ptr> FtsIndexer::OpenCustom(
@@ -376,7 +460,8 @@ Result<FtsIndexer::Ptr> FtsIndexer::OpenCustomFile(
     return tl::make_unexpected(container.error());
   }
   const auto &metadata = (*container)->metadata();
-  if (base.generation == 0 || base.row_count != target.block.doc_count() ||
+  if (metadata.parent_row_begin || base.generation == 0 ||
+      base.row_count != target.block.doc_count() ||
       metadata.base_id != base.base_id ||
       metadata.base_generation != base.generation ||
       metadata.block_id != target.block.id() ||

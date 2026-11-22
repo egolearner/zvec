@@ -172,5 +172,85 @@ TEST(FtsManifestTest, VersionLoadPreservesUnsupportedFormatError) {
   EXPECT_TRUE(FileHelper::RemoveFile(path));
 }
 
+TEST(FtsManifestTest, WritingRootRequiresV2AndAnExactAdjacentCover) {
+  ManifestData data;
+  data.schema = std::make_shared<CollectionSchema>("writing");
+  data.writing_segment_meta = std::make_shared<SegmentMeta>(7);
+  data.writing_segment_meta->set_writing_forward_block(
+      {5, BlockType::SCALAR, 3, 0, 0, {"text"}});
+  BlockMeta block(4, BlockType::FTS_INDEX, 0, 2, 3, {"text"});
+  auto &root = block.fts_writing_.emplace();
+  root.wal_epoch = 17;
+  root.row_frontier = 3;
+  root.writer_id[0] = 5;
+  root.schema_identity = ManifestCodec::SchemaIdentity(*data.schema);
+  FtsRunDescriptor run;
+  run.id[0] = 1;
+  run.metadata_digest[0] = 2;
+  run.generation = 1;
+  run.file_size = 8192;
+  run.rows = 2;
+  root.runs.push_back(run);
+  run.id[0] = 3;
+  run.parent_begin = 2;
+  run.rows = 1;
+  root.runs.push_back(run);
+  data.writing_segment_meta->add_persisted_block(block);
+  data.writing_segment_meta->add_persisted_block(
+      {3, BlockType::SCALAR, 0, 2, 3, {"text"}});
+  std::string bytes;
+  ASSERT_TRUE(ManifestCodec::Encode(data, &bytes).ok());
+  const std::string prefix("\0ZVEC_FTS_MANIFEST_V2\0", 22);
+  EXPECT_EQ(prefix, bytes.substr(0, prefix.size()));
+  // Golden SHA-256 of the complete, independently encoded role + protobuf
+  // payload, including the fixed-width identities and the two run ranges.
+  constexpr uint8_t golden[32] = {
+      0xb2, 0xdc, 0x46, 0xe7, 0x1a, 0x98, 0x05, 0x8c, 0xa9, 0xbc, 0xe2,
+      0xa4, 0xc2, 0x9e, 0xed, 0xe3, 0x5b, 0x00, 0x8e, 0xed, 0xe7, 0x2b,
+      0xa0, 0xb1, 0x29, 0xe1, 0x9d, 0xc2, 0x3a, 0x44, 0x39, 0xa2};
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(golden), sizeof(golden)),
+            bytes.substr(prefix.size() + sizeof(uint64_t), sizeof(golden)));
+  ManifestData decoded;
+  ASSERT_TRUE(ManifestCodec::Decode(bytes, &decoded).ok());
+  EXPECT_TRUE(decoded.use_fts_runs);
+  EXPECT_TRUE(decoded.writing_protocol);
+  ASSERT_TRUE(decoded.writing_segment_meta->writing_fts_checkpoint());
+  EXPECT_EQ(root, *decoded.writing_segment_meta->writing_fts_checkpoint());
+  auto &persisted = data.writing_segment_meta->persisted_blocks()[0];
+  for (int failure = 0; failure < 6; ++failure) {
+    persisted = block;
+    auto &bad = *persisted.fts_writing_;
+    switch (failure) {
+      case 0:
+        bad.runs.back().parent_begin = 1;
+        break;
+      case 1:
+        bad.runs.back().id = bad.runs.front().id;
+        break;
+      case 2:
+        ++bad.runs.back().rows;
+        break;
+      case 3:
+        bad.runs.resize(17);
+        break;
+      case 4:
+        bad.schema_identity.fill(0xff);
+        break;
+      case 5:
+        persisted.fts_base_.emplace();
+        break;
+    }
+    bytes.clear();
+    EXPECT_FALSE(ManifestCodec::Encode(data, &bytes).ok()) << failure;
+    EXPECT_TRUE(bytes.empty());
+  }
+  persisted = block;
+  persisted.set_doc_count(0);
+  persisted.fts_writing_->row_frontier = 0;
+  persisted.fts_writing_->runs.clear();
+  data.writing_segment_meta->persisted_blocks()[1].set_doc_count(0);
+  EXPECT_TRUE(ManifestCodec::Encode(data, &bytes).ok());
+}
+
 }  // namespace
 }  // namespace zvec

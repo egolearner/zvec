@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <zvec/db/status.h>
 #ifdef _MSC_VER
 #define _ALLOW_KEYWORD_MACROS
 #endif
@@ -99,6 +100,90 @@ TEST_F(WalFileTest, ReadOnlyCannotCreateWal) {
   options.read_only = true;
   EXPECT_NE(0, wal->open(options));
   EXPECT_FALSE(FileHelper::FileExists(path));
+}
+
+TEST_F(WalFileTest, EpochOperationChecksIdentityAndWireLayout) {
+  WalOperation op;
+  op.epoch = 0x102;
+  op.sequence = 8;
+  op.kind = WalOperation::Kind::kReplace;
+  op.old_id = 11;
+  op.new_id = 15;
+  op.parent_row = 3;
+  op.schema_identity[0] = 22;
+  op.payload = std::string_view("a\0z", 3);
+  auto encoded = op.encode();
+  ASSERT_TRUE(encoded.has_value());
+  std::string expected(84, '\0');
+  expected.replace(0, 8, "ZVWALOP1");
+  expected[8] = 2;
+  expected[9] = 1;
+  expected[16] = 8;
+  expected[24] = 2;
+  expected[28] = 22;
+  expected[60] = 11;
+  expected[68] = 15;
+  expected[76] = 3;
+  expected[80] = 3;
+  expected.append(op.payload);
+  EXPECT_EQ(expected, *encoded);
+  auto decoded = WalOperation::Decode(*encoded);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(op.payload, decoded->payload);
+  EXPECT_EQ(op.schema_identity, decoded->schema_identity);
+  EXPECT_EQ(op.parent_row, decoded->parent_row);
+  for (size_t i = 0; i < encoded->size(); ++i) {
+    EXPECT_FALSE(WalOperation::Decode(std::string_view(*encoded).substr(0, i)));
+  }
+  op.old_id = op.new_id;
+  EXPECT_FALSE(op.encode());
+}
+
+TEST_F(WalFileTest, EpochReaderSeparatesTailDamageFromChecksumFailure) {
+  const std::string path = "data.wal.epoch";
+  WalOptions options;
+  options.create_new = true;
+  options.epoch = 4;
+  auto wal = WalFile::Create(path);
+  ASSERT_EQ(0, wal->open(options));
+  ASSERT_EQ(0, wal->append("first"));
+  ASSERT_EQ(0, wal->append("second"));
+  ASSERT_EQ(0, wal->close());
+  options.create_new = false;
+  options.epoch = 5;
+  EXPECT_NE(0, wal->open(options));
+  wal = WalFile::Create(path);
+  options.epoch = 4;
+  ailego::File file;
+  ASSERT_TRUE(file.open(path, false));
+  ASSERT_TRUE(file.truncate(file.size() - 1));
+  file.close();
+  ASSERT_EQ(0, wal->open(options));
+  ASSERT_EQ(0, wal->prepare_for_read());
+  auto result = wal->next_checked();
+  ASSERT_TRUE(result);
+  EXPECT_EQ("first", result->data);
+  result = wal->next_checked();
+  ASSERT_TRUE(result);
+  EXPECT_EQ(WalReadResult::State::kTruncatedTail, result->state);
+  ASSERT_TRUE(wal->discard_truncated_tail().ok());
+  ASSERT_EQ(0, wal->append("third"));
+  ASSERT_EQ(0, wal->prepare_for_read());
+  EXPECT_EQ("first", wal->next());
+  EXPECT_EQ("third", wal->next());
+  result = wal->next_checked();
+  ASSERT_TRUE(result);
+  EXPECT_EQ(WalReadResult::State::kEnd, result->state);
+  ASSERT_EQ(0, wal->close());
+  ASSERT_TRUE(file.open(path, false));
+  const char other = 'X';
+  ASSERT_EQ(1u, file.write(64 + 12, &other, 1));
+  file.close();
+  ASSERT_EQ(0, wal->open(options));
+  ASSERT_EQ(0, wal->prepare_for_read());
+  EXPECT_FALSE(wal->next_checked());
+  EXPECT_FALSE(wal->discard_truncated_tail().ok());
+  EXPECT_EQ(0, wal->remove());
 }
 
 TEST_F(WalFileTest, TestGeneral) {

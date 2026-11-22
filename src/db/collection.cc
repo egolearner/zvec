@@ -48,6 +48,7 @@
 #include "db/common/typedef.h"
 #include "db/common/utils.h"
 #include "db/doc_iterator_internal.h"
+#include "db/fts_writing_collection.h"
 #include "db/index/column/fts_column/fts_merge.h"
 #include "db/index/column/vector_column/engine_helper.hpp"
 #include "db/index/common/delete_store.h"
@@ -77,6 +78,15 @@ Collection::~Collection() = default;
 
 class CollectionImpl : public Collection {
   friend class Collection;
+  friend Result<Collection::Ptr> internal::CreateFtsWritingCollection(
+      const std::string &, const CollectionSchema &, const CollectionOptions &);
+  friend Status internal::MigrateFtsWritingCollection(Collection &);
+  friend Result<Collection::Ptr> internal::OpenWithWalReplayObserver(
+      const std::string &, const CollectionOptions &,
+      const std::function<void(uint64_t)> &);
+  friend Status internal::SnapshotFtsWritingCollection(Collection &,
+                                                       const std::string &);
+  bool create_fts_runs_{false};
 
  public:
   explicit CollectionImpl(const std::string &path,
@@ -87,7 +97,8 @@ class CollectionImpl : public Collection {
   ~CollectionImpl() override;
 
  private:
-  Status open(const CollectionOptions &options);
+  Status open(const CollectionOptions &options,
+              const std::function<void(uint64_t)> &on_replayed = {});
 
  public:
   Status close() override;
@@ -188,7 +199,7 @@ class CollectionImpl : public Collection {
 
   Status create();
 
-  Status recovery();
+  Status recovery(const std::function<void(uint64_t)> &on_replayed);
 
   // Called only during a read-only open, after all segments have recovered.
   void prepare_query_internal_ids();
@@ -392,14 +403,144 @@ Result<Collection::Ptr> Collection::CreateAndOpen(
   return collection;
 }
 
+Result<Collection::Ptr> internal::CreateFtsWritingCollection(
+    const std::string &path, const CollectionSchema &schema,
+    const CollectionOptions &options) {
+  auto collection = std::make_shared<CollectionImpl>(path, schema);
+  collection->create_fts_runs_ = true;
+  auto status = collection->open(options);
+  CHECK_RETURN_STATUS_EXPECTED(status);
+  return collection;
+}
+
 Result<Collection::Ptr> Collection::Open(const std::string &path,
                                          const CollectionOptions &options) {
+  return internal::OpenWithWalReplayObserver(path, options, {});
+}
+
+Result<Collection::Ptr> internal::OpenWithWalReplayObserver(
+    const std::string &path, const CollectionOptions &options,
+    const std::function<void(uint64_t)> &on_replayed) {
   auto collection = std::make_shared<CollectionImpl>(path);
 
-  auto s = collection->open(options);
+  auto s = collection->open(options, on_replayed);
   CHECK_RETURN_STATUS_EXPECTED(s);
 
   return collection;
+}
+
+Status internal::MigrateFtsWritingCollection(Collection &source) {
+  auto *collection = dynamic_cast<CollectionImpl *>(&source);
+  if (!collection) {
+    return Status::NotSupported("FTS migration requires a local collection");
+  }
+  std::lock_guard maintenance(collection->maintenance_mtx_);
+  std::lock_guard schema(collection->schema_handle_mtx_);
+  std::lock_guard writer(collection->write_mtx_);
+  if (collection->closed_ || collection->destroyed_ ||
+      collection->options_.read_only_) {
+    return Status::FailedPrecondition(
+        "FTS migration requires a writable open collection");
+  }
+  auto status = collection->check_no_active_iterators("migrate FTS");
+  CHECK_RETURN_STATUS(status);
+  status = collection->check_write_state();
+  CHECK_RETURN_STATUS(status);
+  return collection->writing_segment_->migrate_fts_writer();
+}
+
+Status internal::SnapshotFtsWritingCollection(Collection &source,
+                                              const std::string &destination) {
+  auto *collection = dynamic_cast<CollectionImpl *>(&source);
+  if (!collection) {
+    return Status::NotSupported("FTS snapshot requires a local collection");
+  }
+  std::lock_guard maintenance(collection->maintenance_mtx_);
+  std::lock_guard schema(collection->schema_handle_mtx_);
+  std::lock_guard writer(collection->write_mtx_);
+  if (collection->closed_ || collection->destroyed_ ||
+      collection->options_.read_only_ ||
+      !collection->version_manager_->use_fts_runs()) {
+    return Status::FailedPrecondition(
+        "FTS snapshot requires an open writable run-format collection");
+  }
+  auto status = collection->check_write_state();
+  CHECK_RETURN_STATUS(status);
+  status = collection->writing_segment_->checkpoint_for_fts();
+  CHECK_RETURN_STATUS(status);
+  const auto directory = ailego::FileHelper::PathFromUtf8(destination);
+  std::error_code error;
+  const auto relative = std::filesystem::relative(
+      directory, ailego::FileHelper::PathFromUtf8(collection->path_), error);
+  if (error || relative.empty() || *relative.begin() != "..") {
+    return Status::InvalidArgument(
+        "Snapshot directory must be outside the source collection");
+  }
+  if (!std::filesystem::create_directory(directory, error)) {
+    return Status::InvalidArgument(
+        "Snapshot requires a new destination directory");
+  }
+  auto owner =
+      fts::FtsRetirementQueue::Create()->track(destination, true, true);
+  auto version = collection->version_manager_->get_current_version();
+  status = collection->id_map_->create_snapshot(FileHelper::MakeFilePath(
+      destination, FileID::ID_FILE, version.id_map_path_suffix()));
+  CHECK_RETURN_STATUS(status);
+  auto segments = collection->get_all_persist_segments();
+  segments.push_back(collection->writing_segment_);
+  for (const auto &segment : segments) {
+    status = segment->copy_checkpoint(destination);
+    CHECK_RETURN_STATUS(status);
+  }
+  const auto deleted = ailego::FileHelper::PathFromUtf8(
+      FileHelper::MakeFilePath(collection->path_, FileID::DELETE_FILE,
+                               version.delete_snapshot_path_suffix()));
+  if (std::filesystem::exists(deleted, error)) {
+    std::filesystem::copy_file(deleted, directory / deleted.filename(), error);
+  }
+  if (error) {
+    return Status::InternalError("Cannot snapshot deletion state: ",
+                                 error.message());
+  }
+  auto lock_file = DurableFile::Replace((directory / "LOCK").u8string(), "");
+  CHECK_RETURN_STATUS(lock_file.status);
+  // Sync the private target before publishing its first authoritative version.
+  // This includes CF checkpoint manifests, all SSTs and nested directories.
+  std::vector<std::filesystem::path> directories{directory};
+  std::filesystem::recursive_directory_iterator it(directory, error), end;
+  for (; !error && it != end; it.increment(error)) {
+    auto type = it->symlink_status(error);
+    if (error) {
+      break;
+    }
+    if (std::filesystem::is_directory(type)) {
+      directories.push_back(it->path());
+    } else if (std::filesystem::is_regular_file(type)) {
+      status = DurableFile::Sync(it->path().u8string());
+      CHECK_RETURN_STATUS(status);
+    } else {
+      return Status::InternalError("Unexpected snapshot dependency");
+    }
+  }
+  if (error) {
+    return Status::InternalError("Cannot enumerate snapshot dependencies: ",
+                                 error.message());
+  }
+  for (auto dir = directories.rbegin(); dir != directories.rend(); ++dir) {
+    status = DurableFile::SyncDirectory(dir->u8string());
+    CHECK_RETURN_STATUS(status);
+  }
+  auto target = VersionManager::Create(destination, Version{});
+  if (!target) {
+    return target.error();
+  }
+  status = (*target)->checkpoint(version);
+  CHECK_RETURN_STATUS(status);
+  status = DurableFile::SyncDirectory(
+      directory.has_parent_path() ? directory.parent_path().u8string() : ".");
+  CHECK_RETURN_STATUS(status);
+  owner->preserve();
+  return Status::OK();
 }
 
 CollectionImpl::CollectionImpl(const std::string &path,
@@ -427,7 +568,8 @@ CollectionImpl::~CollectionImpl() {
   }
 }
 
-Status CollectionImpl::open(const CollectionOptions &options) {
+Status CollectionImpl::open(const CollectionOptions &options,
+                            const std::function<void(uint64_t)> &on_replayed) {
   options_ = options;
 
   if (schema_ != nullptr && options_.read_only_) {
@@ -438,7 +580,7 @@ Status CollectionImpl::open(const CollectionOptions &options) {
   Status s;
   if (schema_ == nullptr) {
     // recovery from disk
-    s = recovery();
+    s = recovery(on_replayed);
   } else {
     // create new collection with existing schema
     s = create();
@@ -564,7 +706,7 @@ Status CollectionImpl::flush() {
 Status CollectionImpl::check_write_state() const {
   if (version_manager_ && version_manager_->requires_recovery()) {
     return Status::FailedPrecondition(
-        "Uncertain manifest commit; reopen required");
+        "Uncertain database write or manifest commit; reopen required");
   }
   return Status::OK();
 }
@@ -1916,6 +2058,9 @@ Result<WriteResults> CollectionImpl::write_impl(std::vector<Doc> &docs,
     }
 
     results.push_back(s);
+    if (!s.ok()) {
+      CHECK_RETURN_STATUS_EXPECTED(check_write_state());
+    }
   }
 
   return results;
@@ -2129,6 +2274,9 @@ Result<WriteResults> CollectionImpl::delete_(
   for (auto &&pk : pks) {
     Status s = writing_segment_->Delete(pk);
     results.push_back(s);
+    if (!s.ok()) {
+      CHECK_RETURN_STATUS_EXPECTED(check_write_state());
+    }
   }
 
   return results;
@@ -2450,7 +2598,9 @@ Result<DocPtrList> CollectionImpl::query_unsafe(
   CHECK_RETURN_STATUS_EXPECTED(s);
 
   auto segments = get_all_segments_unsafe();
-  write_lock.unlock();
+  if (!version_manager_->use_fts_runs()) {
+    write_lock.unlock();
+  }
   if (segments.empty()) {
     return DocPtrList();
   }
@@ -2516,7 +2666,9 @@ Result<DocPtrList> CollectionImpl::query_unsafe(const MultiQuery &query) const {
   }
 
   auto segments = get_all_segments_unsafe();
-  write_lock.unlock();
+  if (!version_manager_->use_fts_runs()) {
+    write_lock.unlock();
+  }
   if (segments.empty()) {
     return DocPtrList();
   }
@@ -2582,7 +2734,9 @@ Result<GroupResults> CollectionImpl::group_by_query(
   std::shared_lock write_lock(write_mtx_);
   CHECK_RETURN_STATUS_EXPECTED(check_write_state());
   auto segments = get_all_segments_unsafe();
-  write_lock.unlock();
+  if (!version_manager_->use_fts_runs()) {
+    write_lock.unlock();
+  }
   if (segments.empty()) {
     return GroupResults();
   }
@@ -2610,7 +2764,9 @@ Result<DocPtrMap> CollectionImpl::fetch(
   std::shared_lock write_lock(write_mtx_);
   CHECK_RETURN_STATUS_EXPECTED(check_write_state());
   auto segments = get_all_segments_unsafe();
-  write_lock.unlock();
+  if (!version_manager_->use_fts_runs()) {
+    write_lock.unlock();
+  }
 
   DocPtrMap results;
 
@@ -2682,7 +2838,8 @@ Result<std::string> CollectionImpl::debug_get_hnsw_storage_mode(
       Status::NotFound("No HNSW index found for column '", column_name, "'"));
 }
 
-Status CollectionImpl::recovery() {
+Status CollectionImpl::recovery(
+    const std::function<void(uint64_t)> &on_replayed) {
   if (!FileHelper::DirectoryExists(path_.c_str())) {
     return Status::InvalidArgument("collection path{", path_, "} not exist.");
   }
@@ -2699,6 +2856,7 @@ Status CollectionImpl::recovery() {
 
   version_manager_ = version_manager.value();
   const auto v = version_manager_->get_current_version();
+  version_manager_->select_fts_runs(v.use_fts_runs());
   schema_ = std::make_shared<CollectionSchema>(v.schema());
   options_.enable_mmap_ = v.enable_mmap();
   s = recover_idmap_and_delete_store();
@@ -2728,7 +2886,7 @@ Status CollectionImpl::recovery() {
   // recover writing segment
   auto writing_segment =
       Segment::Open(path_, *schema_, *v.writing_segment_meta(), id_map_,
-                    delete_store_, version_manager_, seg_options);
+                    delete_store_, version_manager_, seg_options, on_replayed);
   if (!writing_segment) {
     return writing_segment.error();
   }
@@ -2898,6 +3056,7 @@ Status CollectionImpl::create() {
   // init version manager
   s = init_version_manager();
   CHECK_RETURN_STATUS(s);
+  version_manager_->select_fts_runs(create_fts_runs_);
 
   // create segment
   s = init_writing_segment();
@@ -2912,8 +3071,8 @@ Status CollectionImpl::create() {
   version.set_delete_snapshot_path_suffix(0);
   version.set_next_segment_id(1);
 
-  version_manager_->apply(version);
-  s = version_manager_->flush();
+  version.set_use_fts_runs(create_fts_runs_);
+  s = version_manager_->checkpoint(version);
   CHECK_RETURN_STATUS(s);
 
   segment_id_allocator_.store(1);

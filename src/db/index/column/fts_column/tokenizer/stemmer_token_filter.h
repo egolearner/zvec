@@ -34,6 +34,8 @@ class StemmerTokenFilter : public TokenFilter {
 
   bool init(const ailego::JsonObject &config) override;
   std::vector<Token> filter(std::vector<Token> tokens) const override;
+  Status validate_streaming() const override;
+  Status filter_one(std::vector<Token> *tokens, size_t budget) const override;
 
   const char *name() const override {
     return "stemmer";

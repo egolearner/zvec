@@ -180,6 +180,51 @@ TEST(FtsFormatTest, MetadataRejectsUnknownFormatsCorruptionAndBudgetOverflow) {
   EXPECT_FALSE(EncodeMetadata(meta));
 }
 
+TEST(FtsFormatTest, RunDomainHasRequiredFeatureMappingAndRecord) {
+  Metadata meta;
+  meta.base_id[0] = 1;
+  meta.base_generation = 2;
+  meta.block_id = 3;
+  meta.source_segment_id = 4;
+  meta.row_count = 3;
+  meta.required_features = kRunLocalDocids;
+  meta.parent_row_begin = 0x112233;
+  auto encoded = EncodeMetadata(meta);
+  ASSERT_TRUE(encoded);
+  auto decoded = DecodeMetadata(*encoded);
+  ASSERT_TRUE(decoded);
+  EXPECT_EQ(meta.parent_row_begin, decoded->parent_row_begin);
+  Sha256 golden;
+  ASSERT_TRUE(
+      golden.update(std::string_view(*encoded).substr(0, encoded->size() - 32))
+          .ok());
+  EXPECT_EQ(Hex(golden.digest()),
+            "dee1b01b4b2f1edfc9dd869407ad635bb6ce3cc3d299bea4ea31f27e24520532");
+
+  auto rehash = [](std::string bytes) {
+    Sha256 hash;
+    hash.update(bytes);
+    const auto digest = hash.digest();
+    bytes.append(reinterpret_cast<const char *>(digest.data()), digest.size());
+    return bytes;
+  };
+  const auto body = encoded->substr(0, 140);
+  auto wrong_mapping = body;
+  wrong_mapping[100] = 1;
+  EXPECT_FALSE(DecodeMetadata(rehash(wrong_mapping)));
+  auto optional_record = body;
+  optional_record[120] = 0;
+  EXPECT_FALSE(DecodeMetadata(rehash(optional_record)));
+  EXPECT_FALSE(DecodeMetadata(rehash(body.substr(0, 116))));
+  EXPECT_FALSE(DecodeMetadata(rehash(body + body.substr(116))));
+  meta.parent_row_begin = UINT32_MAX - 2;
+  EXPECT_FALSE(EncodeMetadata(meta));
+  meta.parent_row_begin = UINT32_MAX - 3;
+  EXPECT_TRUE(EncodeMetadata(meta));
+  meta.required_features = 0;
+  EXPECT_FALSE(EncodeMetadata(meta));
+}
+
 TEST(FtsFormatTest, PostingBlocksPreserveLargeGapsAndFullTf) {
   PostingBlock block;
   block.count = 3;

@@ -15,6 +15,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,8 +27,13 @@
 #include "fts_column_indexer.h"
 #include "fts_file_lifetime.h"
 #include "fts_merge.h"
+#include "fts_stream.h"
 
 namespace zvec {
+
+namespace fts {
+class FtsRun;
+}
 
 // Manages the per-segment FTS RocksDB instance and all FtsColumnIndexers.
 // Analogous to InvertedIndexer for scalar invert indexes.
@@ -89,7 +95,17 @@ class FtsIndexer {
       size_t segment_count, const OpenMergeSource &open_source,
       const roaring::Roaring &deletions, fts::FtsMergePolicy policy,
       const fts::FtsRetirementQueue::Pointer &retirement,
-      const DurableFile::Hook &hook = {});
+      const DurableFile::Hook &hook = {},
+      uint64_t temporary_bytes = UINT64_C(4) << 30);
+
+  // A single run starting at parent row zero already uses the sealed field
+  // codecs and domain. Copy its sections and issue a fresh base generation.
+  static Result<Ptr> PrepareRunSeal(
+      const CustomTarget &target, const FieldSchemaPtrList &fields,
+      const fts::FtsRun &run, const fts::format::Identity &writer_id,
+      const fts::FtsRetirementQueue::Pointer &retirement,
+      const DurableFile::Hook &hook = {},
+      uint64_t temporary_bytes = UINT64_C(4) << 30);
 
   void preserve_files() {
     if (file_owner_) {
@@ -139,6 +155,9 @@ class FtsIndexer {
   const std::string &working_dir() const {
     return working_dir_;
   }
+  const fts::FtsSpoolStats &spool_stats() const {
+    return spool_stats_;
+  }
 
   bool empty() const {
     return indexers_.empty();
@@ -165,9 +184,11 @@ class FtsIndexer {
   static Result<Ptr> PrepareGeneration(
       const CustomTarget &target, const FieldSchemaPtrList &fields,
       const fts::FtsRetirementQueue::Pointer &retirement,
-      const FieldBuilder &build, const DurableFile::Hook &hook);
+      const FieldBuilder &build, const DurableFile::Hook &hook,
+      std::optional<uint64_t> temporary_bytes = std::nullopt);
 
   std::string working_dir_;
+  fts::FtsSpoolStats spool_stats_;
   std::shared_ptr<RocksdbContext> fts_ctx_;
   std::unordered_map<std::string, fts::FtsColumnIndexerPtr> indexers_;
   std::optional<BlockMeta> custom_block_;

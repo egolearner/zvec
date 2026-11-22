@@ -1,6 +1,20 @@
 include(${PROJECT_ROOT_DIR}/cmake/bazel.cmake)
 include(${PROJECT_ROOT_DIR}/cmake/option.cmake)
 
+# Build the vendored UTF-8 algorithms with admission on the one growable
+# Snowball runtime buffer API. Only replace the runtime utilities translation
+# unit. Keep generated code, the host generator and legacy allocator ABI.
+get_target_property(_fts_snowball_sources snowball SOURCES)
+set(_fts_snowball_utilities ${_fts_snowball_sources})
+list(FILTER _fts_snowball_utilities INCLUDE REGEX "/runtime/utilities\\.c$")
+get_filename_component(_fts_snowball_runtime "${_fts_snowball_utilities}" DIRECTORY)
+list(REMOVE_ITEM _fts_snowball_sources "${_fts_snowball_utilities}")
+list(APPEND _fts_snowball_sources "${PROJECT_ROOT_DIR}/cmake/snowball/snowball_utilities.c")
+set_property(TARGET snowball PROPERTY SOURCES "${_fts_snowball_sources}")
+target_include_directories(snowball PRIVATE
+  "${_fts_snowball_runtime}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/index/column/fts_column/tokenizer")
+
 cc_directory(common)
 cc_directory(index)
 cc_directory(sqlengine)

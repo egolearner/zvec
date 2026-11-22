@@ -95,7 +95,8 @@ class FtsFieldWriter {
  public:
   static Result<std::unique_ptr<FtsFieldWriter>> Create(
       uint64_t row_count, format::FieldMetadata metadata,
-      BM25Params params = {});
+      BM25Params params = {},
+      const std::shared_ptr<FtsSpoolWorkspace> &workspace = {});
   Status add_document(uint32_t row, bool present, uint32_t length);
   Status finish_documents();
   Status begin_term(std::string_view term);

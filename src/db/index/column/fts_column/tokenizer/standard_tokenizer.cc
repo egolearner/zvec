@@ -773,7 +773,7 @@ bool is_ascii_text(const std::string &text) {
   return true;
 }
 
-size_t scan_ascii_word_token(const std::string &text, size_t start) {
+size_t scan_ascii_word_token(std::string_view text, size_t start) {
   size_t end = start + 1;
   size_t last_sig = start;
 
@@ -823,7 +823,7 @@ size_t scan_ascii_word_token(const std::string &text, size_t start) {
   return end;
 }
 
-bool ascii_span_has_core_token(const std::string &text, size_t start,
+bool ascii_span_has_core_token(std::string_view text, size_t start,
                                size_t end) {
   for (size_t index = start; index < end; ++index) {
     auto ch = static_cast<unsigned char>(text[index]);
@@ -834,7 +834,7 @@ bool ascii_span_has_core_token(const std::string &text, size_t start,
   return false;
 }
 
-size_t trim_ascii_non_core_suffix(const std::string &text, size_t start,
+size_t trim_ascii_non_core_suffix(std::string_view text, size_t start,
                                   size_t end) {
   size_t trimmed = end;
   while (trimmed > start) {
@@ -847,29 +847,22 @@ size_t trim_ascii_non_core_suffix(const std::string &text, size_t start,
   return trimmed;
 }
 
-void emit_non_empty_ascii_core_span(const std::string &text, size_t start,
-                                    size_t end, uint32_t *position,
-                                    std::vector<Token> *tokens) {
+Status emit_non_empty_ascii_core_span(std::string_view text, size_t start,
+                                      size_t end, uint32_t *position,
+                                      const TokenSink &sink) {
   if (start >= end || !ascii_span_has_core_token(text, start, end)) {
-    return;
+    return Status::OK();
   }
-  Token token;
-  token.text = text.substr(start, end - start);
-  token.offset = static_cast<uint32_t>(start);
-  token.position = (*position)++;
-  tokens->push_back(std::move(token));
+  return sink(text.substr(start, end - start), static_cast<uint32_t>(start),
+              (*position)++);
 }
 
-void emit_ascii_token_span(const std::string &text, size_t start, size_t end,
-                           uint32_t max_token_length, uint32_t *position,
-                           std::vector<Token> *tokens) {
+Status emit_ascii_token_span(std::string_view text, size_t start, size_t end,
+                             uint32_t max_token_length, uint32_t *position,
+                             const TokenSink &sink) {
   if (end - start <= max_token_length) {
-    Token token;
-    token.text = text.substr(start, end - start);
-    token.offset = static_cast<uint32_t>(start);
-    token.position = (*position)++;
-    tokens->push_back(std::move(token));
-    return;
+    return sink(text.substr(start, end - start), static_cast<uint32_t>(start),
+                (*position)++);
   }
 
   size_t token_start = start;
@@ -879,8 +872,11 @@ void emit_ascii_token_span(const std::string &text, size_t start, size_t end,
     auto ch = static_cast<unsigned char>(text[index]);
     if (codepoint_count >= max_token_length && is_ascii_letter_or_digit(ch)) {
       size_t emit_end = trim_ascii_non_core_suffix(text, token_start, index);
-      emit_non_empty_ascii_core_span(text, token_start, emit_end, position,
-                                     tokens);
+      auto status = emit_non_empty_ascii_core_span(text, token_start, emit_end,
+                                                   position, sink);
+      if (!status.ok()) {
+        return status;
+      }
       token_start = index;
       codepoint_count = 0;
       continue;
@@ -893,22 +889,23 @@ void emit_ascii_token_span(const std::string &text, size_t start, size_t end,
   if (end - token_start > max_token_length) {
     token_end = trim_ascii_non_core_suffix(text, token_start, end);
   }
-  emit_non_empty_ascii_core_span(text, token_start, token_end, position,
-                                 tokens);
+  return emit_non_empty_ascii_core_span(text, token_start, token_end, position,
+                                        sink);
 }
 
-std::vector<Token> tokenize_ascii(const std::string &text,
-                                  uint32_t max_token_length) {
-  std::vector<Token> tokens;
-  tokens.reserve(estimate_token_capacity(text.size()));
+Status analyze_ascii(std::string_view text, uint32_t max_token_length,
+                     const TokenSink &sink) {
   uint32_t position = 0;
   size_t index = 0;
   while (index < text.size()) {
     auto ch = static_cast<unsigned char>(text[index]);
     if (is_ascii_letter_or_digit(ch)) {
       size_t end = scan_ascii_word_token(text, index);
-      emit_ascii_token_span(text, index, end, max_token_length, &position,
-                            &tokens);
+      auto status = emit_ascii_token_span(text, index, end, max_token_length,
+                                          &position, sink);
+      if (!status.ok()) {
+        return status;
+      }
       index = end;
       continue;
     }
@@ -917,15 +914,18 @@ std::vector<Token> tokenize_ascii(const std::string &text,
     if (cls == WordBreakClass::ExtendNumLet) {
       size_t end = scan_ascii_word_token(text, index);
       if (ascii_span_has_core_token(text, index, end)) {
-        emit_ascii_token_span(text, index, end, max_token_length, &position,
-                              &tokens);
+        auto status = emit_ascii_token_span(text, index, end, max_token_length,
+                                            &position, sink);
+        if (!status.ok()) {
+          return status;
+        }
       }
       index = end;
       continue;
     }
     ++index;
   }
-  return tokens;
+  return Status::OK();
 }
 
 }  // namespace
@@ -952,9 +952,21 @@ Status StandardTokenizer::init(const ailego::JsonObject &config) {
 
 std::vector<Token> StandardTokenizer::tokenize(const std::string &text) const {
   if (is_ascii_text(text)) {
-    return tokenize_ascii(text, max_token_length_);
+    std::vector<Token> tokens;
+    tokens.reserve(estimate_token_capacity(text.size()));
+    analyze_ascii(
+        text, max_token_length_,
+        [&](std::string_view word, uint32_t offset, uint32_t position) {
+          tokens.push_back({std::string(word), offset, position});
+          return Status::OK();
+        });
+    return tokens;
   }
+  return tokenize_unicode(text);
+}
 
+std::vector<Token> StandardTokenizer::tokenize_unicode(
+    const std::string &text) const {
   std::vector<Token> tokens;
   tokens.reserve(estimate_token_capacity(text.size()));
   uint32_t position = 0;
@@ -1036,6 +1048,46 @@ std::vector<Token> StandardTokenizer::tokenize(const std::string &text) const {
   }
 
   return tokens;
+}
+
+Status StandardTokenizer::analyze_to(std::string_view text,
+                                     const TokenSink &sink,
+                                     size_t workspace_bytes) const {
+  // ASCII whitespace is a hard break in both scanners. Keep the original
+  // scanner choice across chunks: a mixed Unicode document uses Unicode
+  // word-boundary rules throughout, including its ASCII runs.
+  if (std::all_of(text.begin(), text.end(),
+                  [](unsigned char c) { return c < 128; })) {
+    return analyze_ascii(text, max_token_length_, sink);
+  }
+  // Worst case: one codepoint and one single-byte token per input byte,
+  // including old/new vector storage during growth and owned token bytes.
+  const size_t limit =
+      workspace_bytes > 32768 ? (workspace_bytes - 32768) / 256 : 0;
+  size_t offset = 0;
+  uint32_t position = 0;
+  while (offset < text.size()) {
+    size_t bytes = std::min(limit, text.size() - offset);
+    if (bytes < text.size() - offset) {
+      const auto last = text.substr(offset, bytes).find_last_of(" \t\r\n");
+      if (last == std::string_view::npos) {
+        return {StatusCode::RESOURCE_EXHAUSTED,
+                "Standard analyzer span exceeds workspace"};
+      }
+      bytes = last + 1;
+    }
+    std::string chunk(text.substr(offset, bytes));
+    auto tokens = tokenize_unicode(chunk);
+    for (const auto &token : tokens) {
+      auto status = sink(
+          token.text, static_cast<uint32_t>(offset + token.offset), position++);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    offset += bytes;
+  }
+  return Status::OK();
 }
 
 }  // namespace zvec::fts

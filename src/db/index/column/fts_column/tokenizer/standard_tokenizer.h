@@ -42,8 +42,17 @@ class StandardTokenizer : public Tokenizer {
   const char *name() const override {
     return "standard";
   }
+  bool supports_streaming() const override {
+    return true;
+  }
+  size_t minimum_workspace() const override {
+    return 32768 + 4 * 256;
+  }
+  Status analyze_to(std::string_view text, const TokenSink &sink,
+                    size_t workspace_bytes) const override;
 
  private:
+  std::vector<Token> tokenize_unicode(const std::string &text) const;
   // Word tokens with more codepoints than this value are split.
   uint32_t max_token_length_{255};
 };

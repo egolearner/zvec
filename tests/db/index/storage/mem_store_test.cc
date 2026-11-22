@@ -329,6 +329,25 @@ TEST_F(MemStoreTest, ConvertToTableWithIndexFiltering) {
   EXPECT_EQ(table->num_rows(), 3);  // Only selected rows
 }
 
+TEST_F(MemStoreTest, ProjectedTakePreservesRankAcrossBatchesAndPendingRows) {
+  InsertDoc(store_, 0, 2);
+  ASSERT_TRUE(store_->flush().ok());
+  InsertDoc(store_, 2, 4);
+  const std::vector<int> rows{3, 1, 2, 1};
+  auto table = store_->fetch({USER_ID, LOCAL_ROW_ID, GLOBAL_DOC_ID}, rows);
+  ASSERT_TRUE(table);
+  ASSERT_EQ(table->num_columns(), 3);
+  ASSERT_EQ(table->num_rows(), rows.size());
+  for (size_t i = 0; i < rows.size(); ++i) {
+    EXPECT_EQ(table->column(0)->GetScalar(i).ValueOrDie()->ToString(),
+              "pk_" + std::to_string(rows[i]));
+    for (int column : {1, 2}) {
+      EXPECT_EQ(table->column(column)->GetScalar(i).ValueOrDie()->ToString(),
+                std::to_string(rows[i]));
+    }
+  }
+}
+
 TEST_F(MemStoreTest, FetchPrimaryKeysSkipsUnrequestedText) {
   constexpr int64_t kTextBytes = 256 * 1024;
   auto doc = CreateDoc(0);

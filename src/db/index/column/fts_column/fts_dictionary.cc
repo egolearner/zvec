@@ -65,10 +65,11 @@ Result<uint64_t> SectionLength(const FtsContainerReader &container,
 FtsDictionaryWriter::FtsDictionaryWriter() = default;
 FtsDictionaryWriter::~FtsDictionaryWriter() = default;
 
-Result<std::unique_ptr<FtsDictionaryWriter>> FtsDictionaryWriter::Create() {
+Result<std::unique_ptr<FtsDictionaryWriter>> FtsDictionaryWriter::Create(
+    const std::shared_ptr<FtsSpoolWorkspace> &workspace) {
   std::unique_ptr<FtsDictionaryWriter> writer(new FtsDictionaryWriter);
   for (auto *section : {&writer->terms_, &writer->index_, &writer->metadata_}) {
-    auto spool = FtsSpool::Create();
+    auto spool = FtsSpool::Create(workspace);
     if (!spool) {
       return tl::make_unexpected(spool.error());
     }

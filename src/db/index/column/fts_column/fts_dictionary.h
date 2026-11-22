@@ -37,7 +37,8 @@ struct FtsDictionarySummary {
 // Input views remain caller-owned and need only survive add().
 class FtsDictionaryWriter {
  public:
-  static Result<std::unique_ptr<FtsDictionaryWriter>> Create();
+  static Result<std::unique_ptr<FtsDictionaryWriter>> Create(
+      const std::shared_ptr<FtsSpoolWorkspace> &workspace = {});
   ~FtsDictionaryWriter();
   FtsDictionaryWriter(const FtsDictionaryWriter &) = delete;
   FtsDictionaryWriter &operator=(const FtsDictionaryWriter &) = delete;

@@ -391,6 +391,44 @@ TEST_F(FtsContainerTest, BypassAndConcurrentRangeBudgetAreBounded) {
   }
 }
 
+TEST_F(FtsContainerTest, RunRangeBudgetIsSharedAcrossContainers) {
+  for (bool mmap : {false, true}) {
+    auto budget = std::make_shared<FtsReadBudget>(
+        4 * std::max<size_t>(ailego::kVectorPageSize, 4128));
+    auto first = FtsContainerReader::Open(path_, mmap, budget, {});
+    auto second = FtsContainerReader::Open(path_, mmap, budget, {});
+    ASSERT_TRUE(first && second);
+    auto range = (*first)->read("field.0.postings", 0, 1);
+    ASSERT_TRUE(range);
+    first->reset();
+    EXPECT_EQ((*second)->read("field.0.postings", 0, 1).error().code(),
+              StatusCode::RESOURCE_EXHAUSTED);
+    *range = FtsReadRange();
+    EXPECT_TRUE((*second)->read("field.0.postings", 0, 1));
+  }
+}
+
+TEST_F(FtsContainerTest, MergeScanReusesRangeAndKeepsOldSlicesAlive) {
+  for (bool mmap : {false, true}) {
+    auto file = FtsContainerReader::Open(path_, mmap, 128u << 20);
+    ASSERT_TRUE(file);
+    auto scan = (*file)->scan_view();
+    ASSERT_NE(scan, *file);
+    const auto before = (*file)->read_stats().range_reads;
+    auto first = scan->read("field.0.postings", 300, 500);
+    auto second = scan->read("field.0.postings", 4900, 95);
+    ASSERT_TRUE(first && second);
+    EXPECT_EQ((*file)->read_stats().range_reads, before + 1);
+    EXPECT_EQ(scan->read_stats().range_reads, before + 1);
+    ASSERT_TRUE(scan->read("field.0.postings", 40000, 10));
+    EXPECT_FALSE(scan->read("field.0.postings", UINT64_MAX, 1));
+    scan.reset();
+    file->reset();
+    EXPECT_EQ(first->view(), std::string_view(payload_).substr(300, 500));
+    EXPECT_EQ(second->view(), std::string_view(payload_).substr(4900, 95));
+  }
+}
+
 TEST_F(FtsContainerTest, PayloadChecksumIsOnlyCheckedExplicitly) {
   corrupt_section("field.0.postings");
   for (bool mmap : {false, true}) {

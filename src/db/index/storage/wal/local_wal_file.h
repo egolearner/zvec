@@ -18,6 +18,7 @@
 #include <deque>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <zvec/ailego/io/file.h>
@@ -62,6 +63,8 @@ class LocalWalFile : public WalFile {
   int append(std::string &&data) override;
   int prepare_for_read() override;
   std::string next() override;
+  Result<WalReadResult> next_checked() override;
+  Status discard_truncated_tail() override;
 
  public:
   int open(const WalOptions &wal_option) override;
@@ -75,10 +78,12 @@ class LocalWalFile : public WalFile {
   bool has_record() override {
     return file_.size() > sizeof(header_);
   }
+  uint64_t size_bytes() const override {
+    return bytes_.load(std::memory_order_relaxed);
+  }
 
  private:
   int write_record(WalRecord &record);
-  int read_record(WalRecord &record);
 
  private:
   ailego::File file_;
@@ -90,7 +95,10 @@ class LocalWalFile : public WalFile {
   std::mutex file_mutex_;
   uint32_t max_docs_wal_flush_{0};
   std::atomic<uint64_t> docs_count_{0UL};
-  WalHeader header_;
+  std::atomic<uint64_t> bytes_{0};
+  WalHeader header_{};
+  uint64_t epoch_{0};
+  std::optional<size_t> truncated_at_;
 
   bool opened_{false};
   bool read_only_{false};

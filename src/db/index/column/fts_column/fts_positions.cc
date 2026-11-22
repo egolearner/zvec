@@ -27,12 +27,13 @@ Status Corrupt() {
 
 }  // namespace
 
-Result<std::unique_ptr<FtsPositionsWriter>> FtsPositionsWriter::Create() {
-  auto data = FtsSpool::Create();
+Result<std::unique_ptr<FtsPositionsWriter>> FtsPositionsWriter::Create(
+    const std::shared_ptr<FtsSpoolWorkspace> &workspace) {
+  auto data = FtsSpool::Create(workspace);
   if (!data) {
     return tl::make_unexpected(data.error());
   }
-  auto index = FtsSpool::Create();
+  auto index = FtsSpool::Create(workspace);
   if (!index) {
     return tl::make_unexpected(index.error());
   }

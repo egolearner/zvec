@@ -24,7 +24,9 @@
 #include <zvec/core/framework/index_factory.h>
 #include "db/index/column/fts_column/fts_column_indexer.h"
 #include "db/index/column/fts_column/fts_merge.h"
+#include "db/index/column/fts_column/fts_run.h"
 #include "db/index/column/fts_column/fts_source.h"
+#include "db/index/column/fts_column/fts_writing_reader.h"
 #include "db/index/column/fts_column/iterator/fts_batch_disjunction_iterator.h"
 
 namespace zvec::fts {
@@ -180,6 +182,102 @@ TEST_F(FtsFieldTest, BufferDictionaryReusesFencesAndResolvesEqualPrefixes) {
   EXPECT_FALSE((*field)->lookup("abcdefgh10999a"));
   field->reset();
   EXPECT_EQ(pool.metadata_used(), before_field);
+}
+
+TEST_F(FtsFieldTest, WritingRunsJoinDocIdsPositionsAndStatistics) {
+  build({{"hot", 129, 3}, {"rare", 1, 1}});
+  const uint32_t rows = lengths_.size();
+  auto retirement = FtsRetirementQueue::Create();
+  auto budget = std::make_shared<FtsReadBudget>(4 * 1024 * 1024);
+  for (bool mmap : {false, true}) {
+    auto file = FtsContainerReader::Open(path_, mmap);
+    ASSERT_TRUE(file);
+    auto field = FtsFieldReader::Open(*file, 0);
+    ASSERT_TRUE(field);
+    auto input = OpenCustomFtsFieldSource(*field);
+    ASSERT_TRUE(input);
+    auto exhausted = FtsRun::Write(".", mmap, 12, 3, 0, {{*input}}, retirement,
+                                   budget, {}, 1);
+    ASSERT_FALSE(exhausted);
+    EXPECT_EQ(exhausted.error().code(), StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(retirement->pending(), 0u);
+    auto first =
+        FtsRun::Write(".", mmap, 12, 3, 0, {{*input}}, retirement, budget);
+    ASSERT_TRUE(first) << first.error().message();
+    auto second =
+        FtsRun::Write(".", mmap, 12, 3, rows, {{*input}}, retirement, budget);
+    ASSERT_TRUE(second) << second.error().message();
+    auto a = (*first)->reader(0);
+    auto b = (*second)->reader(0);
+    ASSERT_TRUE(a && b);
+    auto aggregate = OpenWritingFtsReader({*a, *b}, {rows, rows});
+    ASSERT_TRUE(aggregate);
+    EXPECT_TRUE((*aggregate)->supports_batches());
+    auto hot = (*aggregate)->lookup("hot");
+    ASSERT_TRUE(hot && *hot);
+    EXPECT_EQ((*hot)->df(), 258u);
+    EXPECT_TRUE(std::isinf((*hot)->max_score(1)));
+    auto absent = (*aggregate)->lookup("absent");
+    ASSERT_TRUE(absent && !*absent);
+
+    auto cursor = (*hot)->postings();
+    ASSERT_TRUE(cursor);
+    EXPECT_EQ(*(*cursor)->advance(rows - 2), rows);
+    EXPECT_EQ(*(*cursor)->advance(rows), rows);
+    auto batch = (*cursor)->next_batch();
+    ASSERT_TRUE(batch && batch->count > 0);
+    EXPECT_EQ(batch->docs[0], rows + 2);
+    EXPECT_EQ(batch->lengths[0], 3u);
+    EXPECT_EQ(batch->tfs[0], 3u);
+    auto payload = (*cursor)->payload();
+    ASSERT_TRUE(payload);
+    EXPECT_EQ(payload->length, 3u);
+    EXPECT_EQ(payload->tf, 3u);
+    EXPECT_EQ(*(*cursor)->advance(UINT32_MAX), UINT32_MAX);
+    EXPECT_EQ(*(*cursor)->next(), UINT32_MAX);
+    auto bound = (*cursor)->bound(rows, 1);
+    ASSERT_TRUE(bound);
+    EXPECT_TRUE(std::isinf(bound->score));
+    auto positions = (*hot)->positions(rows);
+    ASSERT_TRUE(positions);
+    EXPECT_EQ((*positions)->next().value(), std::optional<uint32_t>(0));
+    EXPECT_EQ((*positions)->next().value(), std::optional<uint32_t>(0));
+    EXPECT_EQ((*positions)->next().value(), std::optional<uint32_t>(1));
+    EXPECT_FALSE((*positions)->next().value());
+
+    auto left = (*first)->source(0);
+    auto right = (*second)->source(0);
+    ASSERT_TRUE(left && right);
+    EXPECT_FALSE(FtsRun::Write(".", mmap, 12, 3, 0, {{*right, *left}},
+                               retirement, budget));
+    auto merged = FtsRun::Write(".", mmap, 12, 3, 0, {{*left, *right}},
+                                retirement, budget);
+    ASSERT_TRUE(merged) << merged.error().message();
+    auto reopened = FtsRun::Open(".", mmap, 12, 3, (*merged)->descriptor(),
+                                 retirement, budget);
+    ASSERT_TRUE(reopened);
+    auto wrong = (*merged)->descriptor();
+    wrong.metadata_digest[0] ^= 1;
+    EXPECT_FALSE(FtsRun::Open(".", mmap, 12, 3, wrong, retirement, budget));
+    wrong = (*merged)->descriptor();
+    ++wrong.file_size;
+    EXPECT_FALSE(FtsRun::Open(".", mmap, 12, 3, wrong, retirement, budget));
+    auto compact = (*reopened)->reader(0);
+    ASSERT_TRUE(compact);
+    auto term = (*compact)->lookup("hot");
+    ASSERT_TRUE(term && *term);
+    EXPECT_EQ((*term)->df(), (*hot)->df());
+    auto parent_scorer = (*aggregate)->scorer();
+    EXPECT_EQ(parent_scorer->stats().total_docs, rows * 2);
+    EXPECT_EQ(parent_scorer->stats().total_tokens, (129 * 3 + 1) * 2);
+    EXPECT_EQ((*compact)->scorer()->score((*term)->df(), 3, 4),
+              parent_scorer->score((*hot)->df(), 3, 4));
+    auto merged_source = (*merged)->source(0);
+    ASSERT_TRUE(merged_source);
+    EXPECT_FALSE((*merged_source)->document(rows - 2)->present);
+    EXPECT_TRUE((*merged_source)->document(rows - 1)->present);
+    EXPECT_EQ((*merged_source)->document(rows - 1)->length, 0u);
+  }
 }
 
 TEST_F(FtsFieldTest, StreamsOversizedTermWithoutMaterializingItsKey) {

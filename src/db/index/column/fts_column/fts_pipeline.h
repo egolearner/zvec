@@ -16,12 +16,14 @@
 
 #include <memory>
 #include <zvec/db/index_params.h>
+#include <zvec/db/schema.h>
 #include <zvec/db/status.h>
 
 namespace zvec {
 
 namespace fts {
 class TokenizerPipeline;
+size_t JiebaModelPeakInputBytes();
 }  // namespace fts
 
 namespace detail {
@@ -32,6 +34,10 @@ namespace detail {
 // released when the params instance is destroyed.
 Result<std::shared_ptr<fts::TokenizerPipeline>> AcquireFtsPipeline(
     FtsIndexParams &params);
+Result<std::shared_ptr<fts::TokenizerPipeline>> AcquireFtsWritingPipeline(
+    FtsIndexParams &params);
+Result<size_t> FtsAnalysisMetadataBytes(const FieldSchemaPtrList &fields,
+                                        size_t fixed_bytes, size_t limit);
 
 }  // namespace detail
 }  // namespace zvec

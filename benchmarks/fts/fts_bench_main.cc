@@ -20,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -48,6 +49,7 @@
 #include "db/common/file_helper.h"
 #include "db/common/rocksdb_context.h"
 #include "db/common/typedef.h"
+#include "db/fts_writing_collection.h"
 #include "db/index/column/fts_column/fts_column_indexer.h"
 #include "db/index/column/fts_column/fts_indexer.h"
 #include "db/index/column/fts_column/fts_pipeline.h"
@@ -56,8 +58,10 @@
 #include "db/index/column/fts_column/fts_rocksdb_reducer.h"
 #include "db/index/column/fts_column/fts_types.h"
 #include "db/index/column/fts_column/fts_utils.h"
+#include "db/index/column/fts_column/fts_writing_index.h"
 #include "db/index/column/fts_column/posting/bitpacked_posting_list.h"
 #include "db/index/common/version_manager.h"
+#include "db/index/storage/wal/wal_file.h"
 #include "fts_bench_input.h"
 
 namespace {
@@ -98,7 +102,7 @@ static zvec::FieldSchema::Ptr make_fts_field_schema(
 // gflags
 // ---------------------------------------------------------------------------
 DEFINE_string(cmd, "",
-              "Command to execute: build, search, stats. "
+              "Command to execute: build, search, search-writing, stats. "
               "If empty, auto-detect from -corpus / -query flags.");
 DEFINE_string(index, "", "Path to FTS index directory");
 DEFINE_string(corpus, "", "Path to BEIR corpus.jsonl (build mode)");
@@ -123,8 +127,30 @@ DEFINE_string(mode, "raw",
               "Execution mode: 'raw' (default) operates directly on RocksDB "
               "via FtsColumnIndexer; 'db' operates through "
               "the zvec Collection API (CreateAndOpen / insert / query); "
-              "'index' compares legacy/custom FTS with identical input IDs.");
+              "'index' compares legacy/custom FTS with identical input IDs; "
+              "'writing' measures Collection WAL, mixed writes and replay.");
 DEFINE_string(index_format, "rocksdb", "Index mode: rocksdb or custom");
+DEFINE_string(index_writer, "rocksdb",
+              "Mutable FTS backend: rocksdb or runs (custom seal)");
+DEFINE_bool(
+    index_wal, false,
+    "Append serialized documents to the database WAL during index build");
+DEFINE_int32(index_active_mb, 64, "Active inverted buffer budget in MiB");
+DEFINE_int32(index_soft_runs, 8, "Start merging adjacent runs at this count");
+DEFINE_int32(index_hard_runs, 16, "Maximum number of live disk runs");
+DEFINE_int32(index_probe_every, 0,
+             "Search the writing index after every N rows (0 disables)");
+DEFINE_int32(writing_checkpoint_every, 0,
+             "Collection checkpoint interval in input rows");
+DEFINE_int32(writing_crash_after_replayed, 0,
+             "With recover-crash, exit immediately after applying this many "
+             "WAL records");
+DEFINE_int32(writing_update_every, 0,
+             "Update every Nth input row after inserting it");
+DEFINE_int32(writing_delete_every, 0,
+             "Delete every Nth input row after any update");
+DEFINE_string(writing_probe_term, "the",
+              "Term to query during collection ingest");
 DEFINE_bool(index_mmap, false, "Custom index benchmark read mode");
 DEFINE_bool(index_phrase, false,
             "Index search: match all query tokens as one ordered phrase");
@@ -1825,7 +1851,7 @@ static int do_stats() {
 
 
 // Standalone FTS comparison: both formats use exactly the same mutable
-// FtsIndexer and row IDs. Only seal/open differ. The descriptor below belongs
+// field schema and row IDs. The descriptor below belongs
 // to this benchmark, not to a Collection; it is never a production manifest.
 static double index_milliseconds(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double, std::milli>(
@@ -1842,6 +1868,10 @@ static void index_report_resources() {
     bytes *= 1024;
 #endif
     std::cout << "METRIC\tpeak_rss_bytes\t" << bytes << '\n';
+    std::cout << "METRIC\tcpu_user_s\t"
+              << usage.ru_utime.tv_sec + usage.ru_utime.tv_usec * 1e-6
+              << "\nMETRIC\tcpu_system_s\t"
+              << usage.ru_stime.tv_sec + usage.ru_stime.tv_usec * 1e-6 << '\n';
   }
 #endif
   const auto pool = ailego::MemoryLimitPool::get_instance().stats();
@@ -1928,7 +1958,29 @@ static void index_report_rocksdb(const FtsIndexer::Ptr &indexer,
             << '\n';
 }
 
-static Status index_build() {
+using BenchmarkColumn = std::function<Result<FtsColumnIndexerPtr>()>;
+static Status index_query_passes(const FieldSchema &field,
+                                 const BenchmarkColumn &open_column);
+
+static Status index_build(bool search_writing) {
+  if (search_writing &&
+      (FLAGS_threads != 1 || FLAGS_index_passes < 1 || FLAGS_topk < 1 ||
+       FLAGS_query.empty() || FLAGS_result_file.empty())) {
+    return Status::InvalidArgument(
+        "search-writing needs one reader, query and result files, and positive "
+        "passes and topk");
+  }
+  const bool use_runs = FLAGS_index_writer == "runs";
+  if ((!use_runs && FLAGS_index_writer != "rocksdb") ||
+      (use_runs && FLAGS_index_format != "custom") ||
+      FLAGS_index_active_mb < 1 || FLAGS_index_active_mb > 64 ||
+      FLAGS_index_soft_runs < 2 ||
+      FLAGS_index_hard_runs < FLAGS_index_soft_runs ||
+      static_cast<size_t>(FLAGS_index_hard_runs) >
+          FtsWritingDescriptor::kMaxRuns ||
+      FLAGS_index_probe_every < 0) {
+    return Status::InvalidArgument("Invalid mutable writer, format or budget");
+  }
   if (FLAGS_corpus.empty() ||
       (FLAGS_index_format != "rocksdb" && FLAGS_index_format != "custom")) {
     return Status::InvalidArgument(
@@ -1948,18 +2000,53 @@ static Status index_build() {
       FLAGS_field, build_fts_index_params(FLAGS_extra_params))};
   auto retirement = FtsRetirementQueue::ForDirectory(FLAGS_index);
   const auto mutable_path = FileHelper::MakeFtsIndexPath(FLAGS_index, 0);
-  auto mutable_index =
-      FtsIndexer::CreateAndOpen(mutable_path, fields, true, false, retirement);
-  if (!mutable_index) {
-    return Status::InternalError("Cannot create mutable FTS");
+  CollectionSchema schema{"fts_bench"};
+  auto status = schema.add_field(fields[0]);
+  CHECK_RETURN_STATUS(status);
+  FtsIndexer::Ptr mutable_index;
+  FtsWritingIndex::Ptr writer;
+  if (use_runs) {
+    FtsWritingOptions options;
+    options.active_bytes = size_t(FLAGS_index_active_mb) << 20;
+    options.soft_runs = FLAGS_index_soft_runs;
+    options.hard_runs = FLAGS_index_hard_runs;
+    auto result = FtsWritingIndex::Open(
+        FLAGS_index, 0, 0, FLAGS_index_mmap, schema, retirement,
+        std::make_shared<FtsReadBudget>(64u << 20), options);
+    if (!result) {
+      return result.error();
+    }
+    writer = std::move(*result);
+  } else {
+    mutable_index = FtsIndexer::CreateAndOpen(mutable_path, fields, true, false,
+                                              retirement);
+    if (!mutable_index) {
+      return Status::InternalError("Cannot create mutable FTS");
+    }
+    index_report_rocksdb(mutable_index, FLAGS_field);
   }
-  index_report_rocksdb(mutable_index, FLAGS_field);
+  WalFilePtr wal;
+  if (FLAGS_index_wal) {
+    WalOptions options;
+    options.create_new = true;
+    if (WalFile::CreateAndOpen(FLAGS_index + "/benchmark.wal", options, &wal) !=
+        0) {
+      return Status::InternalError("Cannot create benchmark WAL");
+    }
+  }
+  std::cout << "METRIC\tindex_writer\t" << FLAGS_index_writer
+            << "\nMETRIC\tindex_wal\t" << FLAGS_index_wal << '\n';
   std::cout << "METRIC\tingest_threads\t1\n";
   std::ofstream ids(FLAGS_index + "/document_ids.tsv");
   if (!ids) {
     return Status::InternalError("Cannot create document ID mapping");
   }
   uint64_t rows = 0;
+  // Fixed histogram; report the first integer microsecond covering the
+  // percentile. The final bucket collects latencies of 100 ms and longer.
+  std::vector<uint64_t> latency(100001);
+  double longest_ms = 0, probe_ms = 0;
+  uint64_t probes = 0;
   std::string line;
   while (std::getline(corpus, line)) {
     std::unordered_map<std::string, std::string> doc;
@@ -1969,10 +2056,65 @@ static Status index_build() {
     }
     const auto content =
         doc["title"].empty() ? doc["text"] : doc["title"] + " " + doc["text"];
-    auto status = mutable_index->insert(FLAGS_field, rows, content);
-    CHECK_RETURN_STATUS(status);
+    const auto write_start = std::chrono::steady_clock::now();
+    std::unique_ptr<PreparedFtsDocument> candidate;
+    if (writer) {
+      auto prepared = writer->prepare({content});
+      if (!prepared) {
+        return prepared.error();
+      }
+      candidate = std::move(*prepared);
+    }
+    if (wal) {
+      Doc record;
+      record.set_pk(doc["_id"]);
+      record.set_operator(Operator::INSERT);
+      record.set(FLAGS_field, content);
+      const auto payload = record.serialize();
+      if (wal->append(std::string(payload.begin(), payload.end())) != 0) {
+        return Status::InternalError("Benchmark WAL append failed");
+      }
+    }
+    if (writer) {
+      writer->apply(*candidate);
+    } else {
+      status = mutable_index->insert(FLAGS_field, rows, content);
+      CHECK_RETURN_STATUS(status);
+    }
+    const auto ms = index_milliseconds(write_start);
+    longest_ms = std::max(longest_ms, ms);
+    ++latency[std::min<size_t>(latency.size() - 1, std::ceil(ms * 1000))];
     ids << rows << '\t' << doc["_id"] << '\n';
     ++rows;
+    if (FLAGS_index_probe_every && rows % FLAGS_index_probe_every == 0) {
+      auto start = std::chrono::steady_clock::now();
+      auto pipeline = detail::AcquireFtsPipeline(
+          *std::static_pointer_cast<zvec::FtsIndexParams>(
+              fields[0]->index_params()));
+      if (!pipeline) {
+        return pipeline.error();
+      }
+      auto tokens = (*pipeline)->process(content);
+      if (!tokens.empty()) {
+        auto column =
+            writer
+                ? writer->reader(FLAGS_field)
+                : Result<FtsColumnIndexerPtr>(mutable_index->get(FLAGS_field));
+        if (!column) {
+          return column.error();
+        }
+        fts::FtsQueryParams params;
+        params.topk = FLAGS_topk;
+        auto hits = (*column)->search(TermNode(tokens.front().text), params);
+        if (!hits || hits->empty()) {
+          return hits ? Status::InternalError(
+                            "Writing probe missed a present term")
+                      : hits.error();
+        }
+        ++probes;
+      }
+      probe_ms += index_milliseconds(start);
+    }
     if (rows % 10000 == 0) {
       std::cout << "Indexed " << rows << " rows" << std::endl;
     }
@@ -1982,21 +2124,54 @@ static Status index_build() {
     return Status::InternalError(
         "Corpus or ID mapping I/O failed, or empty corpus");
   }
-  auto status = mutable_index->flush();
+  if (search_writing) {
+    // Query the open writer before the final flush or seal. Acquire the
+    // current column for each query, as a read of a writing segment does.
+    std::cout << "METRIC\tsearch_state\twriting\nMETRIC\ttotal_docs\t" << rows
+              << "\nMETRIC\tingest_before_search_ms\t"
+              << index_milliseconds(started) << std::endl;
+    if (writer) {
+      std::cout << "METRIC\tpublished_flushes\t" << writer->flush_count()
+                << "\nMETRIC\tpublished_merges\t" << writer->merge_count()
+                << std::endl;
+    }
+    auto open_column = [&]() -> Result<FtsColumnIndexerPtr> {
+      if (writer) {
+        return writer->reader(FLAGS_field);
+      }
+      return mutable_index->get(FLAGS_field);
+    };
+    return index_query_passes(*fields.front(), open_column);
+  }
+  const auto ingest_only = index_milliseconds(started);
+  if (wal && wal->flush() != 0) {
+    return Status::InternalError("Benchmark WAL flush failed");
+  }
+  status = writer ? writer->flush() : mutable_index->flush();
   CHECK_RETURN_STATUS(status);
   const auto ingest_ms = index_milliseconds(started);
-  const auto mutable_sst = index_bytes(mutable_path, true);
+  const auto mutable_sst =
+      writer ? Result<uint64_t>(0) : index_bytes(mutable_path, true);
   if (!mutable_sst) {
     return mutable_sst.error();
   }
-  const auto tokens = mutable_index->get(FLAGS_field)->total_tokens();
+  auto column =
+      writer ? writer->reader(FLAGS_field)
+             : Result<FtsColumnIndexerPtr>(mutable_index->get(FLAGS_field));
+  if (!column) {
+    return column.error();
+  }
+  const auto tokens = (*column)->total_tokens();
+  column->reset();
   const auto seal_started = std::chrono::steady_clock::now();
   BlockMeta block{0,        BlockType::FTS_INDEX,        0,
                   rows - 1, static_cast<uint32_t>(rows), {FLAGS_field}};
   FtsIndexer::Ptr prepared;
   if (FLAGS_index_format == "custom") {
-    auto result = mutable_index->prepare_custom(
-        {FLAGS_index, 0, block, FLAGS_index_mmap}, fields, retirement);
+    FtsIndexer::CustomTarget target{FLAGS_index, 0, block, FLAGS_index_mmap};
+    auto result =
+        writer ? writer->seal(target)
+               : mutable_index->prepare_custom(target, fields, retirement);
     if (!result) {
       return result.error();
     }
@@ -2009,14 +2184,13 @@ static Status index_build() {
     CHECK_RETURN_STATUS(status);
   }
   // Closing stops background mutation before syncing the full file set.
-  status = mutable_index->close();
-  CHECK_RETURN_STATUS(status);
+  if (mutable_index) {
+    status = mutable_index->close();
+    CHECK_RETURN_STATUS(status);
+  }
   status = index_sync_tree(FLAGS_index);
   CHECK_RETURN_STATUS(status);
   const auto seal_ms = index_milliseconds(seal_started);
-  CollectionSchema schema{"fts_bench"};
-  status = schema.add_field(fields[0]);
-  CHECK_RETURN_STATUS(status);
   Version descriptor;
   descriptor.set_schema(schema);
   descriptor.set_enable_mmap(FLAGS_index_mmap);
@@ -2033,11 +2207,63 @@ static Status index_build() {
     prepared->preserve_files();
     // Mutable input is retained through descriptor durability. It is not
     // counted as the final immutable custom index.
-    std::filesystem::remove_all(mutable_path, error);
+    if (writer) {
+      std::cout << "METRIC\trun_flushes\t" << writer->flush_count()
+                << "\nMETRIC\trun_merges\t" << writer->merge_count() << '\n';
+      const auto &io = writer->io_stats();
+      std::cout << "METRIC\trun_flush_output_file_bytes\t"
+                << io.flush_output_bytes
+                << "\nMETRIC\trun_merge_input_file_bytes\t"
+                << io.merge_input_bytes
+                << "\nMETRIC\trun_merge_output_file_bytes\t"
+                << io.merge_output_bytes
+                << "\nMETRIC\trun_seal_input_file_bytes\t"
+                << writer->run_file_bytes() << '\n';
+      auto report_spools = [](const char *stage,
+                              const zvec::fts::FtsSpoolStats &stats) {
+        std::cout << "METRIC\t" << stage << "_spool_read_bytes\t"
+                  << stats.read_bytes << "\nMETRIC\t" << stage
+                  << "_spool_written_bytes\t" << stats.written_bytes
+                  << "\nMETRIC\t" << stage << "_job_peak_reserved_disk_bytes\t"
+                  << stats.peak_reserved_bytes << '\n';
+      };
+      report_spools("run_flush", io.flush_spools);
+      report_spools("run_merge", io.merge_spools);
+      report_spools("run_seal", prepared->spool_stats());
+      const auto usage = writer->memory_usage();
+      const char *const metrics[] = {"writing_active_arena_peak_bytes",
+                                     "writing_frozen_arena_peak_bytes",
+                                     "writing_prepare_admission_peak_bytes",
+                                     "writing_metadata_reserved_peak_bytes",
+                                     "writing_flush_admission_peak_bytes",
+                                     "writing_merge_admission_peak_bytes"};
+      static_assert(std::size(metrics) == zvec::fts::FtsWriteBudget::kParts);
+      for (size_t i = 0; i < std::size(metrics); ++i) {
+        std::cout << "METRIC\t" << metrics[i] << '\t' << usage.peak[i] << '\n';
+      }
+      std::cout << "METRIC\twriting_total_reserved_peak_bytes\t"
+                << usage.peak_total
+                << "\nMETRIC\twriting_prepare_vectors_peak_bytes\t"
+                << usage.peak_prepare_vectors
+                << "\nMETRIC\twriting_active_arena_used_peak_bytes\t"
+                << usage.peak_active_used
+                << "\nMETRIC\twriting_frozen_arena_used_peak_bytes\t"
+                << usage.peak_frozen_used
+                << "\nMETRIC\tjieba_model_admitted_input_peak_bytes\t"
+                << zvec::fts::JiebaModelPeakInputBytes() << '\n';
+      writer.reset();
+      retirement->retry();
+    } else {
+      std::filesystem::remove_all(mutable_path, error);
+    }
     if (error) {
       return Status::InternalError("Cannot retire mutable benchmark input: ",
                                    error.message());
     }
+  }
+  const uint64_t wal_bytes = wal ? wal->size_bytes() : 0;
+  if (wal && wal->remove() != 0) {
+    return Status::InternalError("Benchmark WAL cleanup failed");
   }
   const auto publish_ms = index_milliseconds(publish_started);
   uint64_t final_bytes = 0;
@@ -2053,7 +2279,21 @@ static Status index_build() {
     }
     final_bytes = *bytes;
   }
+  uint64_t seen = 0;
+  size_t bucket = 0;
+  for (int percentile : {50, 95, 99}) {
+    while (bucket < latency.size() && seen * 100 < rows * percentile) {
+      seen += latency[bucket++];
+    }
+    std::cout << "METRIC\twrite_p" << percentile << "_us\t" << bucket - 1
+              << '\n';
+  }
   std::cout << std::setprecision(12) << "METRIC\trows\t" << rows << '\n'
+            << "METRIC\twal_file_bytes\t" << wal_bytes << '\n'
+            << "METRIC\tingest_before_flush_ms\t" << ingest_only << '\n'
+            << "METRIC\twrite_max_ms\t" << longest_ms << '\n'
+            << "METRIC\tprobe_count\t" << probes << '\n'
+            << "METRIC\tprobe_ms\t" << probe_ms << '\n'
             << "METRIC\ttotal_tokens\t" << tokens << '\n'
             << "METRIC\tmutable_sst_bytes\t" << *mutable_sst << '\n'
             << "METRIC\tfinal_index_bytes\t" << final_bytes << '\n'
@@ -2127,13 +2367,18 @@ static Status index_search_or_stats(bool stats_only) {
     }
     return Status::OK();
   }
+  return index_query_passes(*fields.front(),
+                            [&] { return indexer->get(field_name); });
+}
+
+static Status index_query_passes(const FieldSchema &field,
+                                 const BenchmarkColumn &open_column) {
   if (FLAGS_query.empty() || FLAGS_result_file.empty()) {
     return Status::InvalidArgument(
         "Index search requires query and result_file");
   }
   auto pipeline = detail::AcquireFtsPipeline(
-      *std::dynamic_pointer_cast<zvec::FtsIndexParams>(
-          fields[0]->index_params()));
+      *std::dynamic_pointer_cast<zvec::FtsIndexParams>(field.index_params()));
   if (!pipeline) {
     return pipeline.error();
   }
@@ -2188,7 +2433,13 @@ static Status index_search_or_stats(bool stats_only) {
         auto ast = build_query_ast_from_tokens(tokens, FLAGS_default_operator,
                                                FLAGS_index_phrase);
         if (ast) {
-          auto found = indexer->get(field_name)->search(*ast, params);
+          auto column = open_column();
+          if (!column) {
+            std::lock_guard lock(error_mutex);
+            failure = column.error();
+            break;
+          }
+          auto found = (*column)->search(*ast, params);
           if (!found) {
             std::lock_guard lock(error_mutex);
             failure = Status{found.error().code(),
@@ -2258,7 +2509,8 @@ static int do_index_bench(const std::string &command) {
     return 1;
   }
   auto status =
-      command == "build"    ? index_build()
+      (command == "build" || command == "search-writing")
+          ? index_build(command == "search-writing")
       : command == "search" ? index_search_or_stats(false)
       : command == "stats"
           ? index_search_or_stats(true)
@@ -2270,6 +2522,270 @@ static int do_index_bench(const std::string &command) {
   index_report_resources();
   return 0;
 }
+
+namespace {
+using BenchClock = std::chrono::steady_clock;
+constexpr char kReplayKey[] = "zvecbenchwalprobe";
+constexpr char kReplacedText[] = "zvecbenchwalold";
+constexpr char kReplayText[] = "zvecbenchwalrecovered";
+
+// Keep instrumentation memory fixed. Quantiles are microsecond upper bounds;
+// for a quantile above 100 ms the upper bound is the longest observed call.
+class WritingLatency {
+ public:
+  void add(BenchClock::time_point start) {
+    const auto us =
+        static_cast<uint64_t>(std::ceil(index_milliseconds(start) * 1000));
+    ++buckets_[std::min<uint64_t>(us, buckets_.size() - 1)];
+    maximum_ = std::max(maximum_, us);
+    total_ += us;
+    ++count_;
+  }
+  void report(const char *label) const {
+    std::cout << "METRIC\t" << label << "_count\t" << count_ << '\n'
+              << "METRIC\t" << label << "_sum_ms\t" << total_ / 1000.0 << '\n'
+              << "METRIC\t" << label << "_max_us\t" << maximum_ << '\n';
+    if (!count_) {
+      return;
+    }
+    for (const unsigned percentile : {50, 95, 99}) {
+      uint64_t seen = 0;
+      for (size_t i = 0; i < buckets_.size(); ++i) {
+        seen += buckets_[i];
+        if (seen >= (count_ * percentile + 99) / 100) {
+          std::cout << "METRIC\t" << label << "_p" << percentile
+                    << "_us_upper\t"
+                    << (i + 1 == buckets_.size() ? maximum_ : i) << '\n';
+          break;
+        }
+      }
+    }
+  }
+
+ private:
+  std::vector<uint64_t> buckets_ = std::vector<uint64_t>(100002);
+  uint64_t count_{0}, maximum_{0}, total_{0};
+};
+
+Status SingleWrite(const Result<WriteResults> &result) {
+  if (!result) {
+    return result.error();
+  }
+  return result->size() == 1
+             ? result->front()
+             : Status::InternalError("Expected one document status");
+}
+
+Result<DocPtrList> WritingSearch(Collection &db, const std::string &term) {
+  SearchQuery query;
+  query.topk_ = FLAGS_topk;
+  query.target_.field_name_ = FLAGS_field;
+  FtsClause clause;
+  clause.match_string_ = term;
+  query.target_.clause_ = std::move(clause);
+  return db.query(query);
+}
+
+Status ReplayProbe(Collection &db, bool create) {
+  if (create) {
+    std::vector<Doc> doc(1);
+    doc.front().set_pk(kReplayKey);
+    doc.front().set(FLAGS_field, std::string(kReplacedText));
+    auto status = SingleWrite(db.insert(doc));
+    CHECK_RETURN_STATUS(status);
+    status = SingleWrite(db.upsert(doc));
+    CHECK_RETURN_STATUS(status);
+    status = SingleWrite(db.delete_({kReplayKey}));
+    CHECK_RETURN_STATUS(status);
+    doc.front().set(FLAGS_field, std::string(kReplayText));
+    status = SingleWrite(db.upsert(doc));
+    CHECK_RETURN_STATUS(status);
+  }
+  auto docs = db.fetch({kReplayKey});
+  auto old_hits = WritingSearch(db, kReplacedText);
+  auto hits = WritingSearch(db, kReplayText);
+  if (!docs || !old_hits || !hits) {
+    return !docs ? docs.error() : (!old_hits ? old_hits.error() : hits.error());
+  }
+  if (!docs->count(kReplayKey) || !docs->at(kReplayKey) ||
+      docs->at(kReplayKey)->get<std::string>(FLAGS_field) != kReplayText ||
+      !old_hits->empty() || hits->size() != 1 ||
+      hits->front()->pk_ref() != kReplayKey) {
+    return Status::InternalError("Writing benchmark replay probe mismatch");
+  }
+  return Status::OK();
+}
+
+Status CollectionWritingBench(const std::string &cmd) {
+  if ((FLAGS_index_writer != "runs" && FLAGS_index_writer != "rocksdb") ||
+      FLAGS_writing_checkpoint_every < 0 || FLAGS_writing_update_every < 0 ||
+      FLAGS_writing_delete_every < 0 || FLAGS_index_probe_every < 0 ||
+      FLAGS_topk <= 0 || FLAGS_writing_crash_after_replayed < 0 ||
+      (FLAGS_writing_crash_after_replayed && cmd != "recover-crash")) {
+    return Status::InvalidArgument(
+        "Invalid collection writing benchmark options");
+  }
+  const CollectionOptions options(false, FLAGS_index_mmap);
+  if (cmd == "migrate") {
+    auto db = Collection::Open(FLAGS_index, options);
+    if (!db) {
+      return db.error();
+    }
+    const auto start = BenchClock::now();
+    auto status = internal::MigrateFtsWritingCollection(**db);
+    CHECK_RETURN_STATUS(status);
+    std::cout << "METRIC\tmigration_ms\t" << index_milliseconds(start) << '\n';
+    return (*db)->close();
+  }
+  std::cout << "METRIC\twriter\t" << FLAGS_index_writer << "\nMETRIC\tmmap\t"
+            << FLAGS_index_mmap << "\nMETRIC\tupdate_every\t"
+            << FLAGS_writing_update_every << "\nMETRIC\tdelete_every\t"
+            << FLAGS_writing_delete_every << "\nMETRIC\tquery_every\t"
+            << FLAGS_index_probe_every << "\nMETRIC\tcheckpoint_every\t"
+            << FLAGS_writing_checkpoint_every << '\n';
+  if (cmd == "recover" || cmd == "recover-crash") {
+    auto start = BenchClock::now();
+    const auto target =
+        static_cast<uint64_t>(FLAGS_writing_crash_after_replayed);
+    auto db = target ? internal::OpenWithWalReplayObserver(
+                           FLAGS_index, options,
+                           [target](uint64_t applied) {
+                             if (applied == target) {
+                               std::cout << "METRIC\tcrash_after_replayed\t"
+                                         << applied << std::endl;
+                               std::_Exit(0);
+                             }
+                           })
+                     : Collection::Open(FLAGS_index, options);
+    if (!db) {
+      return db.error();
+    }
+    if (target) {
+      return Status::InvalidArgument(
+          "Replay did not reach the requested crash point");
+    }
+    std::cout << "METRIC\treopen_ms\t" << index_milliseconds(start) << '\n';
+    auto status = ReplayProbe(**db, false);
+    CHECK_RETURN_STATUS(status);
+    std::cout << "METRIC\treplay_probe_ok\t1" << std::endl;
+    if (cmd == "recover-crash") {
+      std::_Exit(0);  // Leave the same replay source for another process.
+    }
+    return (*db)->close();
+  }
+  if (cmd != "build" && cmd != "crash" && cmd != "create") {
+    return Status::InvalidArgument(
+        "Writing mode commands: create, build, crash, recover, recover-crash, "
+        "migrate");
+  }
+  std::ifstream input(FLAGS_corpus);
+  if (cmd != "create" && !input) {
+    return Status::InvalidArgument("Cannot open writing benchmark corpus");
+  }
+  CollectionSchema schema("fts_writing_bench");
+  auto status = schema.add_field(make_fts_field_schema(
+      FLAGS_field, build_fts_index_params(FLAGS_extra_params)));
+  CHECK_RETURN_STATUS(status);
+  auto db =
+      FLAGS_index_writer == "runs"
+          ? internal::CreateFtsWritingCollection(FLAGS_index, schema, options)
+          : Collection::CreateAndOpen(FLAGS_index, schema, options);
+  if (!db) {
+    return db.error();
+  }
+  if (cmd == "create") {
+    return (*db)->close();
+  }
+  WritingLatency writes, queries, checkpoints;
+  uint64_t rows = 0;
+  std::string line;
+  const auto started = BenchClock::now();
+  auto every = [&](int interval) { return interval && rows % interval == 0; };
+  auto write = [&](auto &&call) {
+    const auto start = BenchClock::now();
+    auto result = SingleWrite(call());
+    writes.add(start);
+    return result;
+  };
+  while (std::getline(input, line)) {
+    std::unordered_map<std::string, std::string> fields;
+    if (!parse_jsonl_line(line, &fields) || !index_valid_id(fields["_id"]) ||
+        fields["_id"] == kReplayKey || !fields.count("text")) {
+      return Status::InvalidArgument("Invalid or reserved corpus ID at row ",
+                                     rows);
+    }
+    auto content = fields["title"].empty()
+                       ? std::move(fields["text"])
+                       : fields["title"] + " " + fields["text"];
+    std::vector<Doc> docs(1);
+    docs.front().set_pk(fields["_id"]);
+    docs.front().set(FLAGS_field, content);
+    status = write([&]() { return (*db)->insert(docs); });
+    CHECK_RETURN_STATUS(status);
+    ++rows;
+    if (every(FLAGS_writing_update_every)) {
+      docs.front().set(FLAGS_field, content + " revision");
+      status = write([&]() { return (*db)->update(docs); });
+      CHECK_RETURN_STATUS(status);
+    }
+    if (every(FLAGS_writing_delete_every)) {
+      status = write([&]() { return (*db)->delete_({fields["_id"]}); });
+      CHECK_RETURN_STATUS(status);
+    }
+    if (every(FLAGS_index_probe_every)) {
+      const auto start = BenchClock::now();
+      auto hits = WritingSearch(**db, FLAGS_writing_probe_term);
+      if (!hits) {
+        return hits.error();
+      }
+      queries.add(start);
+    }
+    if (every(FLAGS_writing_checkpoint_every)) {
+      const auto start = BenchClock::now();
+      status = (*db)->flush();
+      CHECK_RETURN_STATUS(status);
+      checkpoints.add(start);
+    }
+  }
+  if (!rows || input.bad()) {
+    return Status::InternalError("Empty corpus or read error");
+  }
+  const auto ingest_ms = index_milliseconds(started);
+  std::cout << "METRIC\trows\t" << rows << "\nMETRIC\tingest_ms\t" << ingest_ms
+            << "\nMETRIC\tingest_rows_per_second\t" << rows * 1000.0 / ingest_ms
+            << '\n';
+  writes.report("write");
+  queries.report("mixed_query");
+  checkpoints.report("periodic_checkpoint");
+  if (cmd == "crash") {
+    status = ReplayProbe(**db, true);
+    CHECK_RETURN_STATUS(status);
+    index_report_resources();
+    std::cout << "METRIC\tcrash_after_ack\t1" << std::endl;
+    std::_Exit(0);
+  }
+  auto start = BenchClock::now();
+  status = (*db)->flush();
+  CHECK_RETURN_STATUS(status);
+  std::cout << "METRIC\tfinal_checkpoint_ms\t" << index_milliseconds(start)
+            << "\nMETRIC\tthrough_checkpoint_ms\t"
+            << index_milliseconds(started) << '\n';
+  start = BenchClock::now();
+  status = (*db)->optimize();
+  CHECK_RETURN_STATUS(status);
+  status = (*db)->close();
+  CHECK_RETURN_STATUS(status);
+  std::cout << "METRIC\toptimize_close_ms\t" << index_milliseconds(start)
+            << "\nMETRIC\tthrough_optimize_ms\t" << index_milliseconds(started)
+            << '\n';
+  auto bytes = index_bytes(FLAGS_index);
+  if (!bytes) {
+    return bytes.error();
+  }
+  std::cout << "METRIC\tdatabase_bytes\t" << *bytes << '\n';
+  return Status::OK();
+}
+}  // namespace
 
 int main(int argc, char *argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, false);
@@ -2306,6 +2822,21 @@ int main(int argc, char *argv[]) {
 
   if (FLAGS_mode == "index") {
     return do_index_bench(cmd);
+  }
+  if (FLAGS_mode == "writing") {
+    ailego::LoggerBroker::SetLevel(ailego::Logger::LEVEL_WARN);
+    if (FLAGS_index_cache_mb <= 0 || FLAGS_index_cache_mb > 4096 ||
+        ailego::MemoryLimitPool::get_instance().init(
+            size_t(FLAGS_index_cache_mb) << 20) != 0) {
+      return 1;
+    }
+    auto status = CollectionWritingBench(cmd);
+    if (!status.ok()) {
+      std::cerr << status.message() << std::endl;
+      return 1;
+    }
+    index_report_resources();
+    return 0;
   }
 
   // Validate -mode flag

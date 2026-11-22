@@ -15,13 +15,18 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <zvec/ailego/encoding/json/mod_json_plus.h>
 #include <zvec/db/status.h>
 
 namespace zvec::fts {
+
+using TokenSink =
+    std::function<Status(std::string_view, uint32_t offset, uint32_t position)>;
 
 /*! A single token in the tokenization result
  */
@@ -54,6 +59,16 @@ class Tokenizer {
    * order
    */
   virtual std::vector<Token> tokenize(const std::string &text) const = 0;
+
+  virtual bool supports_streaming() const {
+    return false;
+  }
+  virtual size_t minimum_workspace() const {
+    return 0;
+  }
+  virtual Status analyze_to(std::string_view, const TokenSink &, size_t) const {
+    return Status::NotSupported("Unbounded FTS tokenizer: ", name());
+  }
 
   /*! Return tokenizer name
    */

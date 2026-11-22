@@ -14,8 +14,10 @@
 
 #include "fts_stream.h"
 #include <algorithm>
+#include <filesystem>
 #include <limits>
 #include <zvec/ailego/buffer/vector_page_table.h>
+#include <zvec/ailego/utility/file_helper.h>
 
 namespace zvec::fts {
 namespace {
@@ -32,16 +34,48 @@ constexpr uint64_t kOffsetLimit = std::numeric_limits<off_t>::max();
 
 }  // namespace
 
-Result<std::unique_ptr<FtsSpool>> FtsSpool::Create() {
-  auto *file = std::tmpfile();
+Result<std::unique_ptr<FtsSpool>> FtsSpool::Create(
+    const std::shared_ptr<FtsSpoolWorkspace> &workspace) {
+  std::string path;
+  std::FILE *file = nullptr;
+  if (workspace) {
+    if (workspace->files_left_ == 0) {
+      return tl::make_unexpected(Status{StatusCode::RESOURCE_EXHAUSTED,
+                                        "FTS temporary file limit reached"});
+    }
+    path = ailego::FileHelper::PathJoin(
+        workspace->directory_, std::to_string(workspace->next_file_++));
+    const auto native = ailego::FileHelper::PathFromUtf8(path);
+#ifdef _WIN32
+    file = _wfopen(native.c_str(), L"w+bx");
+#else
+    file = std::fopen(native.c_str(), "w+bx");
+#endif
+  } else {
+    file = std::tmpfile();
+  }
   if (!file) {
     return tl::make_unexpected(IoError());
   }
-  return std::unique_ptr<FtsSpool>(new FtsSpool(file));
+  auto spool = std::unique_ptr<FtsSpool>(new FtsSpool(file));
+  if (workspace) {
+    spool->workspace_ = workspace;
+    spool->path_ = std::move(path);
+    --workspace->files_left_;
+  }
+  return spool;
 }
 
 FtsSpool::~FtsSpool() {
   std::fclose(file_);
+  if (workspace_) {
+    ++workspace_->files_left_;
+    std::error_code error;
+    std::filesystem::remove(ailego::FileHelper::PathFromUtf8(path_), error);
+    if (!error) {
+      workspace_->bytes_left_ += charged_;
+    }
+  }
 }
 
 Status FtsSpool::seek(uint64_t offset, bool writing) {
@@ -82,8 +116,18 @@ Status FtsSpool::append(std::string_view bytes) {
   if (!status.ok()) {
     return status;
   }
+  if (workspace_) {
+    if (!workspace_->take(bytes.size())) {
+      return status_ = {StatusCode::RESOURCE_EXHAUSTED,
+                        "FTS temporary space exhausted"};
+    }
+    charged_ += bytes.size();
+  }
   if (std::fwrite(bytes.data(), 1, bytes.size(), file_) != bytes.size()) {
     return status_ = IoError();
+  }
+  if (workspace_) {
+    workspace_->stats_.written_bytes += bytes.size();
   }
   size_ += bytes.size();
   position_ += bytes.size();
@@ -100,6 +144,9 @@ Status FtsSpool::overwrite(uint64_t offset, std::string_view bytes) {
   }
   if (std::fwrite(bytes.data(), 1, bytes.size(), file_) != bytes.size()) {
     return status_ = IoError();
+  }
+  if (workspace_) {
+    workspace_->stats_.written_bytes += bytes.size();
   }
   position_ += bytes.size();
   return Status::OK();
@@ -121,6 +168,9 @@ Result<std::string> FtsSpool::read(uint64_t offset, size_t length) {
   std::string bytes(length, '\0');
   if (std::fread(bytes.data(), 1, length, file_) != length) {
     return tl::make_unexpected(status_ = IoError());
+  }
+  if (workspace_) {
+    workspace_->stats_.read_bytes += length;
   }
   position_ += length;
   return bytes;

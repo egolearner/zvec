@@ -60,11 +60,11 @@ class IDMap {
 
   Status upsert(const std::string &key, uint64_t doc_id);
 
-  void remove(const std::string &key);
-
-  Result<uint64_t> lookup(const std::string &key) const;
+  Status remove(const std::string &key);
 
   bool has(const std::string &key, uint64_t *doc_id = nullptr) const;
+  // INVALID_DOC_ID is a missing key. Storage and decoding errors propagate.
+  Result<uint64_t> lookup(const std::string &key) const;
 
   Status multi_get(const std::vector<std::string> &keys,
                    std::vector<uint64_t> *doc_ids) const;

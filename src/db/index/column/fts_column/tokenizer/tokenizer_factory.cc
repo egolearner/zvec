@@ -20,12 +20,12 @@
 #include "ngram_tokenizer.h"
 #include "standard_tokenizer.h"
 #include "stemmer_token_filter.h"
+#include "tokenizer_pipeline_manager.h"
 #include "whitespace_tokenizer.h"
 
 namespace zvec::fts {
 
-Result<TokenizerPipelinePtr> TokenizerFactory::create(
-    const FtsIndexParams &params) {
+static Result<ailego::JsonObject> parse_config(const FtsIndexParams &params) {
   // Parse extra_params JSON string into a JsonObject.
   // Empty string is treated as an empty object; malformed JSON fails.
   ailego::JsonObject extra_json;
@@ -44,8 +44,30 @@ Result<TokenizerPipelinePtr> TokenizerFactory::create(
     extra_json = parsed.as_object();
   }
 
+  return extra_json;
+}
+
+Result<std::shared_ptr<void>> TokenizerFactory::reserve_model(
+    const FtsIndexParams &params) {
+  if (params.tokenizer_name != "jieba") {
+    return std::shared_ptr<void>{};
+  }
+  auto config = parse_config(params);
+  if (!config) {
+    return tl::make_unexpected(config.error());
+  }
+  return JiebaTokenizer::reserve_model(
+      TokenizerPipelineManager::make_key(params), *config);
+}
+
+Result<TokenizerPipelinePtr> TokenizerFactory::create(
+    const FtsIndexParams &params) {
+  auto config = parse_config(params);
+  if (!config) {
+    return tl::make_unexpected(config.error());
+  }
   TokenizerPtr tokenizer;
-  auto status = create_tokenizer(params.tokenizer_name, extra_json, &tokenizer);
+  auto status = create_tokenizer(params.tokenizer_name, *config, &tokenizer);
   if (!status.ok()) {
     return tl::make_unexpected(std::move(status));
   }
@@ -57,7 +79,7 @@ Result<TokenizerPipelinePtr> TokenizerFactory::create(
       return tl::make_unexpected(Status::InvalidArgument(
           "TokenizerFactory: unknown filter name: ", filter_name));
     }
-    if (!filter->init(extra_json)) {
+    if (!filter->init(*config)) {
       return tl::make_unexpected(Status::InvalidArgument(
           "TokenizerFactory: failed to init filter: ", filter_name));
     }
@@ -74,6 +96,93 @@ std::vector<Token> TokenizerPipeline::process(const std::string &text) const {
     tokens = filter->filter(std::move(tokens));
   }
   return tokens;
+}
+
+Status TokenizerPipeline::validate_streaming(size_t workspace_bytes) const {
+  if (!tokenizer_->supports_streaming()) {
+    return Status::NotSupported("Unbounded FTS tokenizer: ",
+                                tokenizer_->name());
+  }
+  for (const auto &filter : filters_) {
+    auto status = filter->validate_streaming();
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  const size_t filter_bytes =
+      filters_.empty() ? 0 : std::min<size_t>(workspace_bytes / 2, 1024 * 1024);
+  if ((!filters_.empty() && filter_bytes < 8192) ||
+      tokenizer_->minimum_workspace() > workspace_bytes - filter_bytes) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            std::string("Insufficient FTS analyzer workspace for ") +
+                tokenizer_->name()};
+  }
+  return Status::OK();
+}
+
+Status TokenizerPipeline::analyze_to(std::string_view text,
+                                     const TokenSink &sink,
+                                     size_t workspace_bytes) const {
+  if (!sink || text.size() > UINT32_MAX) {
+    return Status::InvalidArgument(
+        "FTS token offset exceeds uint32 or missing sink");
+  }
+  auto status = validate_streaming();
+  if (!status.ok()) {
+    return status;
+  }
+  if (filters_.empty()) {
+    return tokenizer_->analyze_to(text, sink, workspace_bytes);
+  }
+  // Unicode compatibility decomposition expands one code point to at most
+  // 18 code points. Include output capacity growth, the live input token,
+  // and fixed utf8proc scratch for decoding a single code point.
+  const size_t filter_bytes =
+      std::min<size_t>(workspace_bytes / 2, 1024 * 1024);
+  if (filter_bytes < 4096) {
+    return {StatusCode::RESOURCE_EXHAUSTED, "FTS filter workspace too small"};
+  }
+  if (filters_.size() == 1) {
+    if (const auto *lower =
+            dynamic_cast<const LowercaseTokenFilter *>(filters_[0].get())) {
+      std::string scratch;
+      return tokenizer_->analyze_to(
+          text,
+          [&](std::string_view word, uint32_t offset, uint32_t position) {
+            return lower->analyze_one(word, offset, position, filter_bytes,
+                                      &scratch, sink);
+          },
+          workspace_bytes - filter_bytes);
+    }
+  }
+  std::vector<Token> one;
+  one.reserve(1);
+  return tokenizer_->analyze_to(
+      text,
+      [&](std::string_view word, uint32_t offset, uint32_t position) {
+        if (word.size() > (filter_bytes - 4096) / 64) {
+          return Status{StatusCode::RESOURCE_EXHAUSTED,
+                        "FTS filter token exceeds workspace"};
+        }
+        one.push_back({std::string(word), offset, position});
+        for (const auto &filter : filters_) {
+          if (one.front().text.size() > (filter_bytes - 4096) / 64) {
+            return Status{StatusCode::RESOURCE_EXHAUSTED,
+                          "FTS filter token exceeds workspace"};
+          }
+          auto filtered = filter->filter_one(&one, filter_bytes / 2);
+          if (!filtered.ok()) {
+            return filtered;
+          }
+          if (one.empty()) {
+            return Status::OK();
+          }
+        }
+        auto result = sink(one.front().text, offset, position);
+        one.clear();
+        return result;
+      },
+      workspace_bytes - filter_bytes);
 }
 
 Status TokenizerFactory::create_tokenizer(const std::string &tokenizer_name,

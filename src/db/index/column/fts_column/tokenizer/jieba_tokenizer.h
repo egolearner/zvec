@@ -48,8 +48,18 @@ class JiebaTokenizer : public Tokenizer {
   // embedded defaults when no external directory is configured.
   // Stop-word filtering belongs to a TokenFilter, not here.
   Status init(const ailego::JsonObject &config) override;
+  static Result<std::shared_ptr<void>> reserve_model(
+      const std::string &key, const ailego::JsonObject &config);
 
   std::vector<Token> tokenize(const std::string &text) const override;
+  bool supports_streaming() const override {
+    return true;
+  }
+  size_t minimum_workspace() const override {
+    return 8192;
+  }
+  Status analyze_to(std::string_view text, const TokenSink &sink,
+                    size_t workspace_bytes) const override;
 
   const char *name() const override {
     return "jieba";
@@ -80,6 +90,7 @@ class JiebaTokenizer : public Tokenizer {
   std::unique_ptr<cppjieba::HMMSegment> hmm_seg_;
 
   CutMode cut_mode_{CutMode::kSearch};
+  size_t longest_word_{cppjieba::MAX_WORD_LENGTH};
   bool initialized_{false};
 };
 

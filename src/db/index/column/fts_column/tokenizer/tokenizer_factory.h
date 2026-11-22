@@ -15,6 +15,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "token_filter.h"
@@ -35,7 +36,17 @@ class TokenizerPipeline {
    */
   std::vector<Token> process(const std::string &text) const;
 
+  Status validate_streaming(size_t workspace_bytes = SIZE_MAX) const;
+  void retain_model(std::shared_ptr<void> model) {
+    std::lock_guard lock(model_mutex_);
+    model_ = std::move(model);
+  }
+  Status analyze_to(std::string_view text, const TokenSink &sink,
+                    size_t workspace_bytes) const;
+
  private:
+  std::mutex model_mutex_;
+  std::shared_ptr<void> model_;
   TokenizerPtr tokenizer_;
   std::vector<TokenFilterPtr> filters_;
 };
@@ -55,6 +66,11 @@ class TokenizerFactory {
    *  \return        Tokenizer pipeline, or a detailed error status.
    */
   static Result<TokenizerPipelinePtr> create(const FtsIndexParams &params);
+
+  // Admit a process-shared analysis model before a writing schema acquires
+  // its pipeline. The shared lease uses source bytes as its unit.
+  static Result<std::shared_ptr<void>> reserve_model(
+      const FtsIndexParams &params);
 
  private:
   static Status create_tokenizer(const std::string &tokenizer_name,

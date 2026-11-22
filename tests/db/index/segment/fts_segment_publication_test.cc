@@ -13,10 +13,13 @@
 // limitations under the License.
 
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <zvec/ailego/io/file.h>
 #include <zvec/db/collection.h>
+#include "db/common/constants.h"
 #include "db/common/file_helper.h"
+#include "db/fts_writing_collection.h"
 #include "db/index/segment/segment.h"
 #include "db/index/segment/segment_helper.h"
 #include "db/index/segment/segment_manager.h"
@@ -1332,6 +1335,116 @@ TEST_P(FtsSegmentPublicationTest, SuccessorFailureAndRepeatedSwitch) {
 INSTANTIATE_TEST_SUITE_P(BothBackends, FtsSegmentPublicationTest,
                          testing::Values(false, true));
 
+#ifndef _WIN32
+TEST_P(FtsSegmentPublicationTest, RejectedWalRecordReleasesPreparedDocument) {
+  auto schema = schema_;
+  ASSERT_TRUE(schema
+                  .add_field(std::make_shared<FieldSchema>(
+                      "payload", DataType::STRING, true))
+                  .ok());
+  auto db = internal::CreateFtsWritingCollection(path_ + "/retry", schema, {});
+  ASSERT_TRUE(db) << db.error().message();
+  std::vector<Doc> docs(1);
+  docs.front().set_pk("accepted");
+  docs.front().set("text", std::string("visible"));
+  auto accepted = (*db)->insert(docs);
+  ASSERT_TRUE(accepted && accepted->size() == 1 && accepted->front().ok());
+  docs.front().set_pk("too-large");
+  docs.front().set("payload", std::string(64u << 20, 'x'));
+  auto rejected = (*db)->insert(docs);
+  ASSERT_TRUE(rejected && rejected->size() == 1);
+  ASSERT_NE(rejected->front().message().find("Invalid WAL operation"),
+            std::string::npos);
+  ASSERT_TRUE((*db)->flush().ok());
+  docs.front().set_pk("retry");
+  docs.front().set("payload", std::string("small"));
+  auto retried = (*db)->insert(docs);
+  ASSERT_TRUE(retried && retried->size() == 1 && retried->front().ok());
+  auto rows = (*db)->fetch({"accepted", "retry", "too-large"});
+  ASSERT_TRUE(rows);
+  EXPECT_NE(rows->at("accepted"), nullptr);
+  EXPECT_NE(rows->at("retry"), nullptr);
+  EXPECT_EQ(rows->at("too-large"), nullptr);
+}
+
+TEST(FtsWritingRecoveryTest, CorruptCompleteEpochLeavesCommittedStateIntact) {
+  ASSERT_EQ(0, ailego::MemoryLimitPool::get_instance().init(64 * 1024 * 1024));
+  const std::string path = "fts_writing_invalid_epoch.fixture";
+  FileHelper::RemoveDirectory(path);
+  struct Cleanup {
+    std::string path;
+    ~Cleanup() {
+      FileHelper::RemoveDirectory(path);
+    }
+  } cleanup{path};
+  CollectionSchema schema("fts");
+  ASSERT_TRUE(schema
+                  .add_field(std::make_shared<FieldSchema>(
+                      "text", DataType::STRING, true,
+                      std::make_shared<FtsIndexParams>("whitespace")))
+                  .ok());
+  auto db = internal::CreateFtsWritingCollection(path, schema, {});
+  ASSERT_TRUE(db.has_value()) << db.error().message();
+  ASSERT_TRUE((*db)->close().ok());
+  auto manager = VersionManager::Recovery(path);
+  ASSERT_TRUE(manager.has_value()) << manager.error().message();
+  auto v = (*manager)->get_current_version();
+  auto meta = v.writing_segment_meta();
+  ASSERT_TRUE(meta && meta->writing_fts_checkpoint());
+  const auto &root = *meta->writing_fts_checkpoint();
+  const auto wal_path = FileHelper::MakeWalEpochPath(
+      FileHelper::MakeSegmentPath(path, meta->id()), root.wal_epoch);
+  WalFilePtr wal;
+  WalOptions options;
+  options.epoch = root.wal_epoch;
+  ASSERT_EQ(0, WalFile::CreateAndOpen(wal_path, options, &wal));
+  Doc doc;
+  doc.set_pk("uncommitted");
+  doc.set("text", std::string("uncommitted"));
+  doc.set_operator(Operator::INSERT);
+  const auto payload = doc.serialize();
+  WalOperation op;
+  op.new_id = meta->writing_forward_block()->min_doc_id();
+  op.parent_row = root.row_frontier;
+  op.epoch = root.wal_epoch;
+  op.schema_identity = root.schema_identity;
+  op.payload = {reinterpret_cast<const char *>(payload.data()), payload.size()};
+  auto good = op.encode();
+  ASSERT_TRUE(good.has_value());
+  ASSERT_EQ(0, wal->append(std::move(*good)));
+  ASSERT_EQ(0, wal->append("complete frame with invalid operation"));
+  ASSERT_EQ(0, wal->flush());
+  ASSERT_EQ(0, wal->close());
+
+  auto bytes = [](const std::string &file) {
+    std::ifstream input(file, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), {});
+  };
+  const auto orphan = FileHelper::MakeSegmentPath(path, 123);
+  ASSERT_TRUE(FileHelper::CreateDirectory(orphan));
+  const auto authority = path + "/manifest.current";
+  const auto before = bytes(authority);
+  const auto wal_before = bytes(wal_path);
+  ASSERT_FALSE(before.empty());
+  for (bool read_only : {true, false}) {
+    auto failed = Collection::Open(path, CollectionOptions(read_only, false));
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(before, bytes(authority));
+    EXPECT_EQ(wal_before, bytes(wal_path));
+    EXPECT_TRUE(std::filesystem::exists(orphan));
+  }
+  auto id_map = IDMap::CreateAndOpen(
+      "fts",
+      FileHelper::MakeFilePath(path, FileID::ID_FILE, v.id_map_path_suffix()),
+      false, true);
+  ASSERT_TRUE(id_map);
+  auto absent = id_map->lookup(doc.pk_ref());
+  ASSERT_TRUE(absent.has_value());
+  EXPECT_EQ(INVALID_DOC_ID, *absent);
+}
+
+#endif
+
 #if GTEST_HAS_DEATH_TEST && !defined(_WIN32)
 class FtsCheckpointRecoveryDeathTest : public testing::TestWithParam<bool> {
  protected:
@@ -1520,6 +1633,90 @@ TEST_P(FtsCheckpointRecoveryDeathTest,
 TEST_P(FtsCheckpointRecoveryDeathTest,
        FailedAuthorityPublicationPreservesUpsertVisibility) {
   check_replayed_upserts(true);
+}
+
+TEST_P(FtsCheckpointRecoveryDeathTest,
+       RunEpochReplaysResolvedReplacementsAndDeletes) {
+  testing::FLAGS_gtest_death_test_style = "threadsafe";
+  const CollectionOptions options(false, GetParam());
+  // These returns are process exit codes so parent and child never share
+  // writer objects, RocksDB state, or the exclusive collection file lock.
+  auto run_writer = [&]() {
+    if (ailego::MemoryLimitPool::get_instance().init(64 * 1024 * 1024) != 0) {
+      return 10;
+    }
+    auto db = internal::CreateFtsWritingCollection(path_, schema_, options);
+    if (!db) {
+      return 1;
+    }
+    auto ok = [](const Result<WriteResults> &result) {
+      return result && result->size() == 1 && result->front().ok();
+    };
+    std::vector<Doc> docs(1);
+    docs[0].set_pk("a");
+    docs[0].set("text", std::string("checkpoint"));
+    if (!ok((*db)->insert(docs)) || !(*db)->flush().ok()) {
+      return 2;
+    }
+    docs[0].set("text", std::string("replaced"));
+    if (!ok((*db)->upsert(docs))) {
+      return 3;
+    }
+    docs[0].set("text", std::string("updated"));
+    if (!ok((*db)->update(docs)) || !ok((*db)->delete_({"a"}))) {
+      return 4;
+    }
+    docs[0].set("text", std::string("survives"));
+    if (!ok((*db)->upsert(docs))) {
+      return 5;
+    }
+    std::_Exit(0);  // Close would publish the new frontier.
+  };
+  ASSERT_EXIT(std::_Exit(run_writer()), testing::ExitedWithCode(0), "");
+  ASSERT_EQ(0, ailego::MemoryLimitPool::get_instance().init(64 * 1024 * 1024));
+  auto denied = Collection::Open(path_, CollectionOptions(true, GetParam()));
+  EXPECT_FALSE(denied.has_value());
+  auto opened = Collection::Open(path_, options);
+  ASSERT_TRUE(opened.has_value()) << opened.error().message();
+  auto values = (*opened)->fetch({"a"});
+  ASSERT_TRUE(values && values->count("a") && values->at("a"));
+  EXPECT_EQ("survives", values->at("a")->get<std::string>("text"));
+  auto hits = [&](std::string term) {
+    SearchQuery query;
+    query.target_.field_name_ = "text";
+    FtsClause clause;
+    clause.query_string_ = std::move(term);
+    query.target_.clause_ = std::move(clause);
+    query.topk_ = 10;
+    return (*opened)->query(query);
+  };
+  for (const char *term : {"checkpoint", "replaced", "updated", "survives"}) {
+    auto found = hits(term);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(std::string_view(term) == "survives" ? 1u : 0u, found->size());
+  }
+  ASSERT_TRUE((*opened)->flush().ok());
+  auto epoch = [&]() {
+    auto manager = VersionManager::Recovery(path_);
+    if (!manager) {
+      return uint64_t{0};
+    }
+    auto version = (*manager)->get_current_version();
+    const auto *root = version.writing_segment_meta()->writing_fts_checkpoint();
+    return root ? root->wal_epoch : 0;
+  };
+  auto before = epoch();
+  ASSERT_GT(before, 1u);
+  auto deleted = (*opened)->delete_({"a"});
+  ASSERT_TRUE(deleted && deleted->front().ok());
+  ASSERT_TRUE((*opened)->flush().ok());
+  EXPECT_EQ(before + 1, epoch());
+  ASSERT_TRUE((*opened)->close().ok());
+  auto readonly = Collection::Open(path_, CollectionOptions(true, GetParam()));
+  ASSERT_TRUE(readonly.has_value()) << readonly.error().message();
+  values = (*readonly)->fetch({"a"});
+  ASSERT_TRUE(values.has_value());
+  EXPECT_TRUE(values->empty() || !values->at("a"));
 }
 
 INSTANTIATE_TEST_SUITE_P(BothBackends, FtsCheckpointRecoveryDeathTest,

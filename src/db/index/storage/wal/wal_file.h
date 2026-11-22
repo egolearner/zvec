@@ -13,8 +13,11 @@
 // limitations under the License.
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <zvec/db/status.h>
 
 
 namespace zvec {
@@ -27,6 +30,30 @@ struct WalOptions {
   uint32_t max_docs_wal_flush{0};
   bool create_new{false};
   bool read_only{false};
+  uint64_t epoch{0};  // Zero selects the legacy forward-block WAL.
+};
+
+struct WalReadResult {
+  enum class State { kRecord, kEnd, kTruncatedTail };
+  State state;
+  std::string data;
+};
+
+// The serialized Doc is borrowed while encoding/decoding. UINT64_MAX and
+// UINT32_MAX mark absent IDs. The enclosing epoch frame checksums all bytes.
+struct WalOperation {
+  enum class Kind : uint32_t { kInsert = 1, kReplace = 2, kDelete = 3 };
+  Kind kind{Kind::kInsert};
+  uint64_t epoch{0};
+  uint64_t sequence{0};
+  std::array<uint8_t, 32> schema_identity{};
+  uint64_t old_id{UINT64_MAX};
+  uint64_t new_id{UINT64_MAX};
+  uint32_t parent_row{UINT32_MAX};
+  std::string_view payload;
+
+  Result<std::string> encode() const;
+  static Result<WalOperation> Decode(std::string_view bytes);
 };
 
 class WalFile {
@@ -48,6 +75,8 @@ class WalFile {
   virtual int append(std::string &&data) = 0;
   virtual int prepare_for_read() = 0;
   virtual std::string next() = 0;
+  virtual Result<WalReadResult> next_checked() = 0;
+  virtual Status discard_truncated_tail() = 0;
 
  public:
   //! Open and initialize WalFile
@@ -63,6 +92,7 @@ class WalFile {
   virtual int flush() = 0;
 
   virtual bool has_record() = 0;
+  virtual uint64_t size_bytes() const = 0;
 };
 
 };  // namespace zvec

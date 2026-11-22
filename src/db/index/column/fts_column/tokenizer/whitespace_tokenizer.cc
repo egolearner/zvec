@@ -53,4 +53,27 @@ std::vector<Token> WhitespaceTokenizer::tokenize(
   return tokens;
 }
 
+Status WhitespaceTokenizer::analyze_to(std::string_view text,
+                                       const TokenSink &sink, size_t) const {
+  uint32_t position = 0;
+  size_t offset = 0;
+  while (offset < text.size()) {
+    if (std::isspace(static_cast<unsigned char>(text[offset]))) {
+      ++offset;
+      continue;
+    }
+    const size_t begin = offset++;
+    while (offset < text.size() &&
+           !std::isspace(static_cast<unsigned char>(text[offset]))) {
+      ++offset;
+    }
+    auto status = sink(text.substr(begin, offset - begin),
+                       static_cast<uint32_t>(begin), position++);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
 }  // namespace zvec::fts

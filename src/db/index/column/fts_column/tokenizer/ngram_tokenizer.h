@@ -44,6 +44,11 @@ class NGramTokenizer : public Tokenizer {
   const char *name() const override {
     return "ngram";
   }
+  bool supports_streaming() const override {
+    return true;
+  }
+  Status analyze_to(std::string_view text, const TokenSink &sink,
+                    size_t workspace_bytes) const override;
 
  private:
   uint32_t ngram_min_{2};

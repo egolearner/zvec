@@ -75,13 +75,12 @@ class Segment {
                                    const VersionManager::Ptr &version_manager,
                                    const SegmentOptions &options);
 
-  static Result<Ptr> Open(const std::string &path,
-                          const CollectionSchema &schema,
-                          const SegmentMeta &segment_meta,
-                          const IDMap::Ptr &id_map,
-                          const DeleteStore::Ptr &delete_store,
-                          const VersionManager::Ptr &version_manager,
-                          const SegmentOptions &options);
+  static Result<Ptr> Open(
+      const std::string &path, const CollectionSchema &schema,
+      const SegmentMeta &segment_meta, const IDMap::Ptr &id_map,
+      const DeleteStore::Ptr &delete_store,
+      const VersionManager::Ptr &version_manager, const SegmentOptions &options,
+      const std::function<void(uint64_t)> &on_replayed = {});
 
   virtual SegmentID id() const = 0;
 
@@ -272,6 +271,13 @@ class Segment {
   // FTS source intact. Preserve its files when a commit result is uncertain.
   virtual Result<PreparedFtsSeal> prepare_fts_seal(
       const DurableFile::Hook &hook = {}) = 0;
+  virtual Status migrate_fts_writer() {
+    return Status::NotSupported(
+        "FTS writing migration requires a local segment");
+  }
+  virtual Status copy_checkpoint(const std::string &) {
+    return Status::NotSupported("Snapshot requires a local segment");
+  }
   // Only after a successful durable version commit; consumes prepared state.
   virtual void publish_fts_seal(PreparedFtsSeal prepared) = 0;
 

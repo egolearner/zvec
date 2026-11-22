@@ -16,10 +16,12 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <zvec/ailego/io/file.h>
 #include <zvec/core/framework/index_factory.h>
 #include "core/utility/utility_params.h"
+#include "fts_stream.h"
 
 namespace zvec::fts {
 namespace {
@@ -180,21 +182,21 @@ Status CheckEnvelope(const std::string &path) {
 
 }  // namespace
 
-FtsContainerWriter::FtsContainerWriter(core::IndexDumper::Pointer dumper,
-                                       uint32_t granule, std::FILE *spool)
+FtsContainerWriter::FtsContainerWriter(
+    core::IndexDumper::Pointer dumper, uint32_t granule,
+    std::unique_ptr<FtsSpool> spool,
+    std::shared_ptr<FtsSpoolWorkspace> workspace)
     : dumper_(std::move(dumper)),
       granule_(granule),
-      spool_(spool),
+      spool_(std::move(spool)),
+      workspace_(std::move(workspace)),
       output_size_(dumper_->size()) {}
 
-FtsContainerWriter::~FtsContainerWriter() {
-  if (spool_) {
-    std::fclose(spool_);
-  }
-}
+FtsContainerWriter::~FtsContainerWriter() = default;
 
 Result<std::unique_ptr<FtsContainerWriter>> FtsContainerWriter::Create(
-    core::IndexDumper::Pointer dumper, uint32_t layout_granule) {
+    core::IndexDumper::Pointer dumper, uint32_t layout_granule,
+    std::shared_ptr<FtsSpoolWorkspace> workspace) {
   if (!dumper || layout_granule < 1024 || layout_granule > 65536 ||
       (layout_granule & (layout_granule - 1)) != 0) {
     return tl::make_unexpected(
@@ -203,12 +205,28 @@ Result<std::unique_ptr<FtsContainerWriter>> FtsContainerWriter::Create(
   if (dumper->size() > PayloadLimit()) {
     return tl::make_unexpected(Exhausted());
   }
-  std::FILE *spool = std::tmpfile();
+  if (workspace) {
+    // Header, version string, alignment of the version, payload and table,
+    // generated section directory entries and footer. User sections charge
+    // their own record and NUL-terminated name before appending them.
+    const auto framing =
+        dumper->size() + std::strlen(core::IndexVersion::Details()) + 96 +
+        sizeof(core::IndexFormat::MetaFooter) +
+        3 * sizeof(core::IndexFormat::SegmentMeta) + sizeof("IndexVersion") +
+        sizeof("fts.meta") + sizeof("checksums");
+    if (!workspace->take(framing)) {
+      return tl::make_unexpected(
+          Status{StatusCode::RESOURCE_EXHAUSTED,
+                 "FTS candidate framing exceeds disk budget"});
+    }
+  }
+  auto spool = FtsSpool::Create(workspace);
   if (!spool) {
-    return tl::make_unexpected(IoError());
+    return tl::make_unexpected(spool.error());
   }
   return std::unique_ptr<FtsContainerWriter>(
-      new FtsContainerWriter(std::move(dumper), layout_granule, spool));
+      new FtsContainerWriter(std::move(dumper), layout_granule,
+                             std::move(*spool), std::move(workspace)));
 }
 
 Status FtsContainerWriter::begin_section(const std::string &name) {
@@ -246,11 +264,18 @@ Status FtsContainerWriter::checksum_page() {
     return status_ = status;
   }
   const auto digest = hash.digest();
-  if (checksum_bytes_ > std::numeric_limits<size_t>::max() - kChecksumPage ||
-      std::fwrite(checksum_page_.data(), 1, checksum_page_.size(), spool_) !=
-          checksum_page_.size() ||
-      std::fwrite(digest.data(), 1, digest.size(), spool_) != digest.size()) {
-    return status_ = IoError();
+  if (checksum_bytes_ > std::numeric_limits<size_t>::max() - kChecksumPage) {
+    return status_ = Exhausted();
+  }
+  status =
+      spool_->append({reinterpret_cast<const char *>(checksum_page_.data()),
+                      checksum_page_.size()});
+  if (status.ok()) {
+    status = spool_->append(
+        {reinterpret_cast<const char *>(digest.data()), digest.size()});
+  }
+  if (!status.ok()) {
+    return status_ = status;
   }
   checksum_bytes_ += kChecksumPage;
   checksum_page_.fill(0);
@@ -275,6 +300,10 @@ Status FtsContainerWriter::checksum_chunk() {
 Status FtsContainerWriter::write_bytes(std::string_view bytes) {
   if (bytes.size() > PayloadLimit() - output_size_) {
     return status_ = Exhausted();
+  }
+  if (workspace_ && !workspace_->take(bytes.size())) {
+    return status_ = {StatusCode::RESOURCE_EXHAUSTED,
+                      "FTS candidate exceeds disk budget"};
   }
   if (dumper_->write(bytes.data(), bytes.size()) != bytes.size()) {
     return status_ = IoError();
@@ -328,6 +357,11 @@ Status FtsContainerWriter::end_section() {
       return status_;
     }
   }
+  if (workspace_ && !workspace_->take(sizeof(core::IndexFormat::SegmentMeta) +
+                                      active_name_.size() + 1)) {
+    return status_ = {StatusCode::RESOURCE_EXHAUSTED,
+                      "FTS directory exceeds disk budget"};
+  }
   if (dumper_->append(active_name_, static_cast<size_t>(section_length_), 0,
                       0) != 0) {
     return status_ = IoError();
@@ -366,22 +400,18 @@ Status FtsContainerWriter::finish(const format::Metadata &metadata) {
       return status_;
     }
   }
-  if (std::fflush(spool_) != 0 || std::fseek(spool_, 0, SEEK_SET) != 0) {
-    return status_ = IoError();
-  }
   // A bounded copy buffer, independent of the size of the checksum directory.
-  std::string copy(16384, '\0');
-  uint64_t remaining = checksum_bytes_;
-  while (remaining != 0) {
-    const size_t n =
-        static_cast<size_t>(std::min<uint64_t>(remaining, copy.size()));
-    if (std::fread(copy.data(), 1, n, spool_) != n) {
-      return status_ = IoError();
+  for (uint64_t offset = 0; offset < checksum_bytes_;) {
+    const size_t n = static_cast<size_t>(
+        std::min<uint64_t>(checksum_bytes_ - offset, 16384));
+    auto bytes = spool_->read(offset, n);
+    if (!bytes) {
+      return status_ = bytes.error();
     }
-    if (!write_bytes(std::string_view(copy.data(), n)).ok()) {
+    if (!write_bytes(*bytes).ok()) {
       return status_;
     }
-    remaining -= n;
+    offset += n;
   }
   if (dumper_->append("checksums", static_cast<size_t>(checksum_bytes_), 0,
                       0) != 0) {
@@ -404,7 +434,7 @@ struct FtsContainerReader::Lease {
   Lease(std::shared_ptr<FtsContainerReader> reader, size_t charge)
       : owner(std::move(reader)), bytes(charge) {}
   ~Lease() {
-    owner->reserved_.fetch_sub(bytes, std::memory_order_relaxed);
+    owner->budget_->used_.fetch_sub(bytes, std::memory_order_relaxed);
   }
 };
 
@@ -431,26 +461,38 @@ void FtsReadRange::swap(FtsReadRange &other) noexcept {
 
 Result<std::shared_ptr<FtsContainerReader::Lease>> FtsContainerReader::reserve(
     size_t bytes) {
-  size_t current = reserved_.load(std::memory_order_relaxed);
+  size_t current = budget_->used_.load(std::memory_order_relaxed);
   do {
-    if (bytes > budget_ - current) {
+    if (bytes > budget_->limit_ - current) {
       return tl::make_unexpected(Exhausted());
     }
-  } while (!reserved_.compare_exchange_weak(current, current + bytes,
-                                            std::memory_order_relaxed));
+  } while (!budget_->used_.compare_exchange_weak(current, current + bytes,
+                                                 std::memory_order_relaxed));
   return std::make_shared<Lease>(shared_from_this(), bytes);
 }
 
 Result<FtsContainerReader::Pointer> FtsContainerReader::Open(
     const std::string &path, bool enable_mmap, size_t read_budget,
     std::shared_ptr<void> file_owner) {
+  return Open(path, enable_mmap, std::make_shared<FtsReadBudget>(read_budget),
+              std::move(file_owner));
+}
+
+Result<FtsContainerReader::Pointer> FtsContainerReader::Open(
+    const std::string &path, bool enable_mmap,
+    std::shared_ptr<FtsReadBudget> read_budget,
+    std::shared_ptr<void> file_owner) {
+  if (!read_budget) {
+    return tl::make_unexpected(
+        Status::InvalidArgument("Missing FTS read budget"));
+  }
   const auto envelope = CheckEnvelope(path);
   if (!envelope.ok()) {
     return tl::make_unexpected(envelope);
   }
   Pointer reader(new FtsContainerReader());
   reader->file_owner_ = std::move(file_owner);
-  reader->budget_ = read_budget;
+  reader->budget_ = std::move(read_budget);
   reader->buffer_pool_ = !enable_mmap;
   reader->storage_ = core::IndexFactory::CreateStorage(
       enable_mmap ? "MMapFileReadStorage" : "BufferReadStorage");
@@ -559,9 +601,98 @@ Status FtsContainerReader::verify_chunk(const format::SectionMetadata &meta,
   return Status::OK();
 }
 
+struct FtsContainerReader::ScanWindows {
+  static constexpr size_t kBytes = 32768;
+  struct Window {
+    std::string name;
+    uint64_t size{0}, begin{0};
+    std::shared_ptr<FtsReadRange> range;
+  };
+  std::array<Window, 8> sections;
+  std::mutex mutex;
+};
+
+FtsContainerReader::Pointer FtsContainerReader::scan_view() {
+  if (scan_base_) {
+    return scan_base_->scan_view();
+  }
+  // Leave at least half the shared budget for posting cursors, queries and
+  // overlapping ranges. Tight budgets retain only the normal cursor windows.
+  const size_t page =
+      std::max<size_t>(metadata_.layout_granule,
+                       std::max(ailego::kVectorPageSize, kChecksumPage));
+  if (budget_->limit_ < 2 * 16 * 8 * (4 * page + ScanWindows::kBytes)) {
+    return shared_from_this();
+  }
+  Pointer view(new FtsContainerReader());
+  view->scan_base_ = shared_from_this();
+  view->scan_windows_ = std::make_shared<ScanWindows>();
+  view->storage_ = storage_;
+  view->buffer_pool_ = buffer_pool_;
+  return view;
+}
+
+Result<FtsReadRange> FtsContainerReader::scan_range(const std::string &section,
+                                                    uint64_t offset,
+                                                    uint64_t length) {
+  constexpr size_t kWindow = ScanWindows::kBytes;
+  if (length == 0 || length > kWindow) {
+    return scan_base_->read(section, offset, length);
+  }
+  std::lock_guard lock(scan_windows_->mutex);
+  for (auto &window : scan_windows_->sections) {
+    if (window.name.empty()) {
+      const auto &sections = scan_base_->metadata_.sections;
+      auto found =
+          std::find_if(sections.begin(), sections.end(),
+                       [&](const auto &item) { return item.name == section; });
+      if (found == sections.end()) {
+        return tl::make_unexpected(
+            Status::NotFound("Missing FTS scan section"));
+      }
+      window.name = section;
+      window.size = found->length;
+    }
+    if (window.name != section) {
+      continue;
+    }
+    if (!format::ValidRange(offset, length, window.size)) {
+      return tl::make_unexpected(Corrupt());
+    }
+    if (!window.range || offset < window.begin ||
+        !format::ValidRange(offset - window.begin, length,
+                            window.range->view().size())) {
+      window.range.reset();
+      window.begin = offset;
+      auto bytes = scan_base_->read(
+          section, offset, std::min<uint64_t>(kWindow, window.size - offset));
+      if (!bytes) {
+        if (bytes.error().code() == StatusCode::RESOURCE_EXHAUSTED) {
+          return scan_base_->read(section, offset, length);
+        }
+        return tl::make_unexpected(bytes.error());
+      }
+      window.range = std::make_shared<FtsReadRange>(std::move(*bytes));
+    }
+    FtsReadRange slice;
+    slice.lease_ = window.range;
+    slice.length_ = length;
+    // The storage API takes void* for a borrowed block, but FtsReadRange
+    // only exports a read-only string_view.
+    auto *data = const_cast<char *>(window.range->view().data());
+    slice.block_ = core::IndexStorage::MemoryBlock::MakeBorrowedView(
+        data + (offset - window.begin));
+    return slice;
+  }
+  return scan_base_->read(section, offset, length);
+}
+
 Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
                                               uint64_t offset,
                                               uint64_t length) {
+  if (scan_base_) {
+    return scan_range(section_name, offset, length);
+  }
   const format::SectionMetadata *meta = nullptr;
   for (const auto &section : metadata_.sections) {
     if (section.name == section_name) {
@@ -624,6 +755,9 @@ Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
 }
 
 Status FtsContainerReader::verify_all() {
+  if (scan_base_) {
+    return scan_base_->verify_all();
+  }
   for (const auto &section : metadata_.sections) {
     uint64_t offset = 0;
     while (offset < section.length) {

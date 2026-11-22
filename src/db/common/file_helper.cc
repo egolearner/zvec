@@ -27,9 +27,11 @@ namespace zvec {
 const std::string FileHelper::BACKUP_SUFFIX = ".backup_";
 const std::string FileHelper::RECOVER_SUFFIX = ".recovering";
 
-std::string FileHelper::MakeCustomFtsPath(
-    const std::string &seg_path, uint32_t block_id, uint64_t generation,
-    const std::array<uint8_t, 16> &base_id) {
+namespace {
+std::string GenerationPath(const std::string &seg_path, uint32_t block_id,
+                           uint64_t generation,
+                           const std::array<uint8_t, 16> &base_id,
+                           const char *extension) {
   static constexpr char digits[] = "0123456789abcdef";
   std::string identity;
   identity.reserve(32);
@@ -39,7 +41,20 @@ std::string FileHelper::MakeCustomFtsPath(
   }
   return ailego::FileHelper::PathJoin(
       seg_path, ailego::StringHelper::Concat("fts.", block_id, ".", generation,
-                                             ".", identity, ".zfts"));
+                                             ".", identity, extension));
+}
+}  // namespace
+
+std::string FileHelper::MakeCustomFtsPath(
+    const std::string &seg_path, uint32_t block_id, uint64_t generation,
+    const std::array<uint8_t, 16> &base_id) {
+  return GenerationPath(seg_path, block_id, generation, base_id, ".zfts");
+}
+
+std::string FileHelper::MakeFtsRunPath(const std::string &seg_path,
+                                       uint32_t block_id, uint64_t generation,
+                                       const std::array<uint8_t, 16> &id) {
+  return GenerationPath(seg_path, block_id, generation, id, ".run");
 }
 
 bool FileHelper::CopyFile(const std::string &src_file_path,

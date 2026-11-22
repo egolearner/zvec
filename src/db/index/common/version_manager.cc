@@ -29,8 +29,10 @@
 #include <zvec/db/status.h>
 #include "db/common/file_helper.h"
 #include "db/common/typedef.h"
+#include "db/index/column/fts_column/fts_container.h"
 #include "db/index/column/fts_column/fts_file_lifetime.h"
 #include "db/index/column/fts_column/fts_format.h"
+#include "db/index/column/fts_column/fts_write_budget.h"
 #include "db/index/common/manifest_codec.h"
 #include "db/index/common/type_helper.h"
 
@@ -67,6 +69,8 @@ Result<std::string> ReadBytes(const std::string &path, size_t limit) {
 Result<std::string> EncodeVersion(const Version &version, bool gated = false) {
   ManifestData manifest;
   manifest.requires_commit_record = gated || version.requires_commit_record();
+  manifest.writing_protocol = version.writing_protocol();
+  manifest.use_fts_runs = version.use_fts_runs();
   manifest.schema = std::make_shared<CollectionSchema>(version.schema());
   manifest.enable_mmap = version.enable_mmap();
   manifest.persisted_segment_metas = version.persisted_segment_metas();
@@ -173,7 +177,9 @@ Status Version::Decode(std::string_view bytes, Version *version) {
   Version *destination = version;
   version = &candidate;
   version->requires_commit_record_ = manifest.requires_commit_record;
+  version->writing_protocol_ = manifest.writing_protocol;
   version->bootstrap_baseline_ = manifest.bootstrap_baseline;
+  version->use_fts_runs_ = manifest.use_fts_runs;
   version->set_schema(*manifest.schema);
 
   version->set_enable_mmap(manifest.enable_mmap);
@@ -394,7 +400,9 @@ VersionManager::VersionManager(const std::string &path,
     : path_(path),
       current_version_(initial_version.clone()),
       version_id_(version_id),
-      fts_retirement_(fts::FtsRetirementQueue::ForDirectory(path)) {}
+      fts_retirement_(fts::FtsRetirementQueue::ForDirectory(path)),
+      fts_read_budget_(std::make_shared<fts::FtsReadBudget>(64u << 20)),
+      fts_write_budget_(std::make_shared<fts::FtsWriteBudget>()) {}
 
 void VersionManager::pin_publication(Version *version, uint32_t manifest_id) {
   version->manifest_owner_ = fts_retirement_->track(
@@ -435,6 +443,7 @@ Status VersionManager::apply(const Version &version) {
   auto prepared = version.clone();
   prepared.bootstrap_baseline_ = current_version_.bootstrap_baseline_;
   prepared.requires_commit_record_ |= current_version_.requires_commit_record_;
+  prepared.writing_protocol_ |= current_version_.writing_protocol_;
   current_version_ = std::move(prepared);
   return Status::OK();
 }
@@ -557,7 +566,7 @@ Status VersionManager::commit_locked(const Version &candidate,
     return Status::FailedPrecondition(
         "Uncertain manifest commit; reopen required");
   }
-  if (!committed_id_) {
+  if (!committed_id_ && !candidate.use_fts_runs()) {
     return Status::FailedPrecondition(
         "A recoverable source checkpoint is required");
   }
@@ -565,6 +574,7 @@ Status VersionManager::commit_locked(const Version &candidate,
   // durable authority. Only infallible moves/scalar stores follow the commit.
   Version prepared = candidate.clone();
   prepared.requires_commit_record_ = true;
+  prepared.writing_protocol_ = true;
   prepared.bootstrap_baseline_ = false;
   auto encoded = EncodeVersion(prepared, true);
   if (!encoded) {
@@ -580,7 +590,7 @@ Status VersionManager::commit_locked(const Version &candidate,
   const auto record = EncodeCommit(*id, *encoded);
   pin_publication(&prepared, *id);
 
-  if (!explicit_authority_) {
+  if (!explicit_authority_ && committed_id_) {
     // Gate the numbered source before installing authority. Otherwise a
     // pre-authority binary can still modify that source after a failed upgrade.
     const auto source_path =
@@ -608,6 +618,7 @@ Status VersionManager::commit_locked(const Version &candidate,
       }
     }
     current_version_.requires_commit_record_ = true;
+    current_version_.writing_protocol_ = true;
     current_version_.bootstrap_baseline_ = true;
     const auto old_record = EncodeCommit(*committed_id_, *baseline);
     auto outcome = DurableFile::Replace(authority_path, old_record, hook);
@@ -628,6 +639,7 @@ Status VersionManager::commit_locked(const Version &candidate,
     requires_recovery_ = outcome.renamed;
     return outcome.status;
   }
+  explicit_authority_ = true;
   publish_version(std::move(prepared), *id);
   return Status::OK();
 }

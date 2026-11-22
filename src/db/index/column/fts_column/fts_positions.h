@@ -27,7 +27,8 @@ using FtsPositionSource = std::function<Result<std::optional<uint32_t>>()>;
 // that section. TF selects the representation; it is never a sentinel value.
 class FtsPositionsWriter {
  public:
-  static Result<std::unique_ptr<FtsPositionsWriter>> Create();
+  static Result<std::unique_ptr<FtsPositionsWriter>> Create(
+      const std::shared_ptr<FtsSpoolWorkspace> &workspace = {});
   Result<format::ByteRange> append_document(uint32_t tf,
                                             const FtsPositionSource &source);
   Result<format::ByteRange> append_block_index(

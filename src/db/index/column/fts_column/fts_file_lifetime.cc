@@ -31,6 +31,42 @@ FtsFileOwner::~FtsFileOwner() {
   }
 }
 
+void FtsFileOwner::register_run(uint64_t bytes) {
+  std::lock_guard lock(queue_->mutex_);
+  auto &entry = entry_.front();
+  if (entry.bytes == 0) {
+    entry.bytes = bytes;
+    if (remove_.load()) {
+      auto &account = entry.retired ? queue_->retired_bytes_
+                                    : queue_->uncheckpointed_bytes_;
+      account += bytes;
+    }
+  }
+}
+
+void FtsFileOwner::preserve() noexcept {
+  std::lock_guard lock(queue_->mutex_);
+  auto &entry = entry_.front();
+  if (remove_.exchange(false)) {
+    auto &account =
+        entry.retired ? queue_->retired_bytes_ : queue_->uncheckpointed_bytes_;
+    account -= entry.bytes;
+    entry.retired = false;
+  }
+}
+
+void FtsFileOwner::retire() noexcept {
+  std::lock_guard lock(queue_->mutex_);
+  auto &entry = entry_.front();
+  if (!entry.retired) {
+    if (remove_.exchange(true)) {
+      queue_->uncheckpointed_bytes_ -= entry.bytes;
+    }
+    queue_->retired_bytes_ += entry.bytes;
+    entry.retired = true;
+  }
+}
+
 FtsRetirementQueue::Pointer FtsRetirementQueue::Create(Hook before_remove) {
   return Pointer(new FtsRetirementQueue(std::move(before_remove)));
 }
@@ -145,6 +181,8 @@ size_t FtsRetirementQueue::retry() {
     if (error) {
       ++it;
     } else {
+      auto &account = it->retired ? retired_bytes_ : uncheckpointed_bytes_;
+      account -= it->bytes;
       it = batch.erase(it);
       ++removed;
     }

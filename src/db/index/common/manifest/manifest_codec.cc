@@ -139,6 +139,7 @@ constexpr uint32_t kMaxDocId = 4;
 constexpr uint32_t kDocCount = 5;
 constexpr uint32_t kColumns = 6;
 constexpr uint32_t kFtsBase = 7;
+constexpr uint32_t kFtsWriting = 8;
 }  // namespace f_block
 namespace f_segment {
 constexpr uint32_t kSegmentId = 1;
@@ -155,6 +156,7 @@ constexpr uint32_t kWritingSegmentMeta = 5;
 constexpr uint32_t kIdMapPathSuffix = 6;
 constexpr uint32_t kDeleteSnapshotPathSuffix = 7;
 constexpr uint32_t kNextSegmentId = 8;
+constexpr uint32_t kUseFtsRuns = 9;
 }  // namespace f_manifest
 
 // The first byte is an illegal protobuf tag, including for historical
@@ -162,12 +164,45 @@ constexpr uint32_t kNextSegmentId = 8;
 constexpr char kFtsManifestMagic[] = "\0ZVEC_FTS_MANIFEST_V1\0";
 constexpr std::string_view kFtsManifestPrefix(kFtsManifestMagic,
                                               sizeof(kFtsManifestMagic) - 1);
+constexpr char kWritingManifestMagic[] = "\0ZVEC_FTS_MANIFEST_V2\0";
+constexpr std::string_view kWritingManifestPrefix(
+    kWritingManifestMagic, sizeof(kWritingManifestMagic) - 1);
 
-constexpr char kBootstrapManifestMagic[] = "\0ZVEC_FTS_MANIFEST_V2\0";
-constexpr std::string_view kBootstrapManifestPrefix(
-    kBootstrapManifestMagic, sizeof(kBootstrapManifestMagic) - 1);
+Status ValidateWriting(const BlockMeta &block) {
+  const auto &root = *block.fts_writing_;
+  if (block.type() != BlockType::FTS_INDEX || block.fts_base_ ||
+      root.row_frontier != block.doc_count() || root.wal_epoch == 0 ||
+      root.schema_identity == std::array<uint8_t, 32>{} ||
+      root.writer_id == std::array<uint8_t, 16>{} ||
+      root.runs.size() > FtsWritingDescriptor::kMaxRuns) {
+    return Status::InternalError("Invalid FTS writing checkpoint");
+  }
+  uint64_t frontier = 0;
+  for (size_t i = 0; i < root.runs.size(); ++i) {
+    const auto &run = root.runs[i];
+    if (run.id == std::array<uint8_t, 16>{} ||
+        run.metadata_digest == std::array<uint8_t, 32>{} ||
+        run.generation == 0 || run.file_size == 0 || run.rows == 0 ||
+        run.parent_begin != frontier ||
+        !fts::format::ValidRange(frontier, run.rows, root.row_frontier)) {
+      return Status::InternalError("Invalid FTS run identity or row domain");
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (root.runs[j].id == run.id) {
+        return Status::InternalError("Duplicate FTS run identity");
+      }
+    }
+    frontier += run.rows;
+  }
+  return frontier == root.row_frontier
+             ? Status::OK()
+             : Status::InternalError("Incomplete FTS run coverage");
+}
 
 Status ValidateFtsBase(const BlockMeta &block) {
+  if (block.fts_writing_) {
+    return ValidateWriting(block);
+  }
   if (!block.fts_base_) {
     return Status::OK();
   }
@@ -186,32 +221,121 @@ Status ValidateFtsBase(const BlockMeta &block) {
   return Status::OK();
 }
 
-Status ValidateFtsBases(const ManifestData &data, bool *has_custom) {
+Status ValidateFtsBases(const ManifestData &data, bool *has_custom,
+                        bool *has_writing) {
   *has_custom = false;
-  auto check_segment = [&](const SegmentMeta::Ptr &segment) -> Status {
+  *has_writing = false;
+  auto check_segment = [&](const SegmentMeta::Ptr &segment,
+                           bool writing) -> Status {
     if (!segment) {
       return Status::OK();
     }
+    uint64_t forward_rows = 0;
+    uint32_t fts_blocks = 0;
     for (const auto &block : segment->persisted_blocks()) {
+      if (block.type() == BlockType::SCALAR) {
+        forward_rows += block.doc_count();
+      }
+      if (block.type() == BlockType::FTS_INDEX) {
+        ++fts_blocks;
+      }
       auto status = ValidateFtsBase(block);
       if (!status.ok()) {
         return status;
       }
       *has_custom |= block.fts_base_.has_value();
+      if (block.fts_writing_) {
+        if (!writing || *has_writing || !data.schema ||
+            block.fts_writing_->schema_identity !=
+                ManifestCodec::SchemaIdentity(*data.schema)) {
+          return Status::InternalError("Misplaced FTS writing descriptor");
+        }
+        *has_writing = true;
+      }
     }
     if (segment->has_writing_forward_block() &&
-        segment->writing_forward_block()->fts_base_) {
+        (segment->writing_forward_block()->fts_base_ ||
+         segment->writing_forward_block()->fts_writing_)) {
       return Status::InternalError("FTS base on a writing forward block");
+    }
+    if (const auto *root = segment->writing_fts_checkpoint()) {
+      if (fts_blocks != 1 || forward_rows != root->row_frontier ||
+          !segment->has_writing_forward_block() ||
+          segment->writing_forward_block()->doc_count() != 0) {
+        return Status::InternalError(
+            "FTS checkpoint disagrees with forward frontier");
+      }
+    } else if (writing && data.use_fts_runs && data.schema &&
+               data.schema->has_fts_field()) {
+      return Status::InternalError("Missing committed FTS writing descriptor");
     }
     return Status::OK();
   };
   for (const auto &segment : data.persisted_segment_metas) {
-    auto status = check_segment(segment);
+    auto status = check_segment(segment, false);
     if (!status.ok()) {
       return status;
     }
   }
-  return check_segment(data.writing_segment_meta);
+  return check_segment(data.writing_segment_meta, true);
+}
+
+template <size_t N>
+void AppendIdentity(const std::array<uint8_t, N> &id, std::string *out) {
+  out->append(reinterpret_cast<const char *>(id.data()), N);
+}
+
+template <size_t N>
+void ReadIdentity(fts::format::Decoder *in, std::array<uint8_t, N> *id) {
+  auto bytes = in->take(N);
+  if (in->ok()) {
+    std::copy(bytes.begin(), bytes.end(), id->begin());
+  }
+}
+
+std::string EncodeWriting(const FtsWritingDescriptor &root) {
+  std::string out;
+  fts::format::AppendU32(1, &out);
+  fts::format::AppendU64(root.wal_epoch, &out);
+  fts::format::AppendU32(root.row_frontier, &out);
+  AppendIdentity(root.schema_identity, &out);
+  AppendIdentity(root.writer_id, &out);
+  fts::format::AppendU32(static_cast<uint32_t>(root.runs.size()), &out);
+  for (const auto &run : root.runs) {
+    AppendIdentity(run.id, &out);
+    AppendIdentity(run.metadata_digest, &out);
+    fts::format::AppendU64(run.generation, &out);
+    fts::format::AppendU64(run.file_size, &out);
+    fts::format::AppendU32(run.parent_begin, &out);
+    fts::format::AppendU32(run.rows, &out);
+  }
+  return out;
+}
+
+Status DecodeWriting(std::string_view bytes, FtsWritingDescriptor *root) {
+  fts::format::Decoder in(bytes);
+  if (in.u32() != 1) {
+    return Status::NotSupported("Unknown FTS writing descriptor version");
+  }
+  root->wal_epoch = in.u64();
+  root->row_frontier = in.u32();
+  ReadIdentity(&in, &root->schema_identity);
+  ReadIdentity(&in, &root->writer_id);
+  const auto count = in.u32();
+  if (!in.ok() || count > FtsWritingDescriptor::kMaxRuns ||
+      in.remaining() != 72 * count) {
+    return Status::InternalError("Invalid FTS run directory length");
+  }
+  root->runs.resize(count);
+  for (auto &run : root->runs) {
+    ReadIdentity(&in, &run.id);
+    ReadIdentity(&in, &run.metadata_digest);
+    run.generation = in.u64();
+    run.file_size = in.u64();
+    run.parent_begin = in.u32();
+    run.rows = in.u32();
+  }
+  return Status::OK();
 }
 
 Status WrapManifest(std::string_view prefix, std::string_view payload,
@@ -223,8 +347,7 @@ Status WrapManifest(std::string_view prefix, std::string_view payload,
   }
   out->append(prefix);
   fts::format::AppendU64(payload.size(), out);
-  const auto digest = hash.digest();
-  out->append(reinterpret_cast<const char *>(digest.data()), digest.size());
+  AppendIdentity(hash.digest(), out);
   out->append(payload);
   return Status::OK();
 }
@@ -989,6 +1112,9 @@ void ManifestCodec::EncodeBlockMeta(const BlockMeta &meta, std::string *out) {
   if (meta.fts_base_) {
     w.put_message(f_block::kFtsBase, EncodeFtsBase(*meta.fts_base_));
   }
+  if (meta.fts_writing_) {
+    w.put_message(f_block::kFtsWriting, EncodeWriting(*meta.fts_writing_));
+  }
 }
 
 BlockMeta::Ptr ManifestCodec::DecodeBlockMeta(std::string_view buf,
@@ -1020,6 +1146,17 @@ BlockMeta::Ptr ManifestCodec::DecodeBlockMeta(std::string_view buf,
         break;
       case f_block::kColumns:
         meta->add_column(r.string_value());
+        break;
+      case f_block::kFtsWriting:
+        if (r.wire_type() != pbwire::kLenDelim || meta->fts_writing_) {
+          *error = Status::InternalError("Malformed or duplicate FTS run set");
+          return nullptr;
+        }
+        meta->fts_writing_.emplace();
+        *error = DecodeWriting(r.bytes(), &*meta->fts_writing_);
+        if (!error->ok()) {
+          return nullptr;
+        }
         break;
       case f_block::kFtsBase:
         if (r.wire_type() != pbwire::kLenDelim || meta->fts_base_) {
@@ -1104,9 +1241,19 @@ SegmentMeta::Ptr ManifestCodec::DecodeSegmentMeta(std::string_view buf,
   return meta;
 }
 
+std::array<uint8_t, 32> ManifestCodec::SchemaIdentity(
+    const CollectionSchema &schema) {
+  std::string bytes;
+  EncodeCollectionSchema(schema, &bytes);
+  fts::format::Sha256 hash;
+  hash.update(bytes);
+  return hash.digest();
+}
+
 Status ManifestCodec::Encode(const ManifestData &data, std::string *out) {
   bool custom = false;
-  auto status = ValidateFtsBases(data, &custom);
+  bool writing = false;
+  auto status = ValidateFtsBases(data, &custom, &writing);
   if (!status.ok()) {
     return status;
   }
@@ -1136,6 +1283,11 @@ Status ManifestCodec::Encode(const ManifestData &data, std::string *out) {
   w.put_varint(f_manifest::kDeleteSnapshotPathSuffix,
                data.delete_snapshot_path_suffix);
   w.put_varint(f_manifest::kNextSegmentId, data.next_segment_id);
+  w.put_bool(f_manifest::kUseFtsRuns, writing || data.use_fts_runs);
+  if (writing || data.use_fts_runs || data.writing_protocol) {
+    encoded.insert(encoded.begin(), '\0');  // Ordinary committed candidate.
+    return WrapManifest(kWritingManifestPrefix, encoded, out);
+  }
   if (custom || data.requires_commit_record) {
     return WrapManifest(kFtsManifestPrefix, encoded, out);
   }
@@ -1152,7 +1304,7 @@ Result<std::string> ManifestCodec::GateLegacyBaseline(std::string_view bytes) {
   std::string payload(1, '\1');
   payload.append(bytes);
   std::string out;
-  auto status = WrapManifest(kBootstrapManifestPrefix, payload, &out);
+  auto status = WrapManifest(kWritingManifestPrefix, payload, &out);
   if (!status.ok()) {
     return tl::make_unexpected(status);
   }
@@ -1161,10 +1313,12 @@ Result<std::string> ManifestCodec::GateLegacyBaseline(std::string_view bytes) {
 
 Status ManifestCodec::Decode(std::string_view buf, ManifestData *data) {
   bool gated = !buf.empty() && buf.front() == '\0';
-  const bool baseline = buf.substr(0, kBootstrapManifestPrefix.size()) ==
-                        kBootstrapManifestPrefix;
+  bool writing = false;
+  bool baseline = false;
   if (gated) {
-    if (!baseline &&
+    writing =
+        buf.substr(0, kWritingManifestPrefix.size()) == kWritingManifestPrefix;
+    if (!writing &&
         buf.substr(0, kFtsManifestPrefix.size()) != kFtsManifestPrefix) {
       return Status::NotSupported("Unsupported manifest envelope");
     }
@@ -1187,16 +1341,18 @@ Status ManifestCodec::Decode(std::string_view buf, ManifestData *data) {
       return Status::InternalError("Manifest checksum mismatch");
     }
     buf = payload;
-    if (baseline) {
-      if (buf.empty() || buf.front() != '\1') {
-        return Status::NotSupported("Unsupported FTS manifest role");
+    if (writing) {
+      if (buf.empty() || (buf.front() != '\0' && buf.front() != '\1')) {
+        return Status::NotSupported("Unknown FTS writing manifest role");
       }
+      baseline = buf.front() == '\1';
       buf.remove_prefix(1);
     }
   }
   // Decode into a candidate so failures cannot publish partial metadata.
   ManifestData candidate;
   candidate.requires_commit_record = gated;
+  candidate.writing_protocol = writing;
   candidate.bootstrap_baseline = baseline;
   ManifestData *destination = data;
   data = &candidate;
@@ -1236,6 +1392,13 @@ Status ManifestCodec::Decode(std::string_view buf, ManifestData *data) {
       case f_manifest::kNextSegmentId:
         data->next_segment_id = r.uint32_value();
         break;
+      case f_manifest::kUseFtsRuns:
+        if (!writing || baseline || data->use_fts_runs ||
+            r.wire_type() != pbwire::kVarint || r.varint() != 1) {
+          return Status::NotSupported("Invalid FTS writing backend selection");
+        }
+        data->use_fts_runs = true;
+        break;
       default:
         break;
     }
@@ -1244,15 +1407,17 @@ Status ManifestCodec::Decode(std::string_view buf, ManifestData *data) {
     return Status::InternalError("Malformed manifest data");
   }
   bool custom = false;
-  status = ValidateFtsBases(*data, &custom);
+  bool has_writing = false;
+  status = ValidateFtsBases(*data, &custom, &has_writing);
   if (!status.ok()) {
     return status;
   }
-  if (baseline && custom) {
-    return Status::NotSupported("Bootstrap manifest requires a legacy source");
-  }
   if (custom && !gated) {
     return Status::NotSupported("FTS base requires a gated manifest");
+  }
+  if ((has_writing && !data->use_fts_runs) ||
+      (baseline && (custom || has_writing))) {
+    return Status::NotSupported("Incompatible FTS writing manifest role");
   }
   if (!data->schema) {
     // An absent schema means the file is not a valid manifest; the protobuf

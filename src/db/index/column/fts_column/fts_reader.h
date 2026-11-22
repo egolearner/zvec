@@ -84,9 +84,10 @@ class FtsSegmentReader {
   using Ptr = std::shared_ptr<FtsSegmentReader>;
   virtual ~FtsSegmentReader() = default;
   virtual BM25ScorerPtr scorer() const = 0;
-  // True only when every posting cursor supports next_batch() and the scorer
-  // statistics are immutable for this reader's lifetime.
-  virtual bool supports_batches() const {
+  // Select batched term OR only when every cursor supports next_batch() and
+  // the scoring statistics are stable. A reader can prefer filter pushdown
+  // through its scalar iterator when it has usable block-max bounds.
+  virtual bool supports_batches(bool /*filtered*/ = false) const {
     return false;
   }
   virtual Result<FtsReadTerm::Ptr> lookup(std::string_view term) const = 0;

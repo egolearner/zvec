@@ -218,11 +218,21 @@ Result<void> FtsColumnIndexer::open_reader(FtsFieldReader::Pointer field) {
   if (!reader) {
     return tl::make_unexpected(reader.error());
   }
-  reader_ = std::move(*reader);
-  field_name_ = field->metadata().name;
+  return open_reader(field->metadata().name, std::move(*reader));
+}
+
+Result<void> FtsColumnIndexer::open_reader(std::string field_name,
+                                           FtsSegmentReader::Ptr reader) {
+  if (opened_.load() || !reader || !reader->scorer()) {
+    return tl::make_unexpected(
+        Status::InvalidArgument("Invalid FTS segment reader"));
+  }
+  reader_ = std::move(reader);
+  field_name_ = std::move(field_name);
   scorer_ = reader_->scorer();
-  total_docs_.store(field->metadata().scoring_document_count);
-  total_tokens_.store(field->metadata().total_tokens);
+  const auto stats = scorer_->stats();
+  total_docs_.store(stats.total_docs);
+  total_tokens_.store(stats.total_tokens);
   opened_.store(true);
   return {};
 }
@@ -284,7 +294,7 @@ Result<std::vector<FtsResult>> FtsColumnIndexer::search(
   if (auto status = budget.check(ast); !status.ok()) {
     return tl::make_unexpected(status);
   }
-  bool batch_or = reader_->supports_batches() && !query_params.filter &&
+  bool batch_or = reader_->supports_batches(query_params.filter != nullptr) &&
                   !query_params.candidate_ids && ast.type() == FtsNodeType::OR;
   if (batch_or) {
     const auto &children = static_cast<const OrNode &>(ast).children;

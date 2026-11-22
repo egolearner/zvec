@@ -19,7 +19,7 @@
 
 namespace zvec::fts {
 
-enum class FtsMergePolicy { kCompact, kRewrite };
+enum class FtsMergePolicy { kCompact, kRewrite, kCoalesceRuns };
 
 // One budget for the planner and reducer. Source caches and the single active
 // legacy position value are separate; the per-input charge covers cursor

@@ -131,6 +131,7 @@ Result<format::FieldMetadata> MergeFtsField(
     format::FieldMetadata metadata, FtsContainerWriter *container,
     uint32_t field_ordinal, BM25Params params) {
   if (!container || inputs.empty() ||
+      (policy == FtsMergePolicy::kCoalesceRuns && !deletions.isEmpty()) ||
       (policy == FtsMergePolicy::kRewrite &&
        (inputs.size() != 1 || !deletions.isEmpty()))) {
     return tl::make_unexpected(Status::InvalidArgument("Invalid FTS merge"));
@@ -139,6 +140,7 @@ Result<format::FieldMetadata> MergeFtsField(
   // may be retained while copying a posting. Custom positions remain paged.
   FtsMergeBudget budget;
   uint64_t rows = 0;
+  uint64_t scoring_documents = 0;
   for (const auto &source : inputs) {
     if (!source ||
         source->statistics().scoring_documents > source->statistics().rows ||
@@ -152,6 +154,7 @@ Result<format::FieldMetadata> MergeFtsField(
                                         "FTS merge workspace exceeded"});
     }
     rows += source->statistics().rows;
+    scoring_documents += source->statistics().scoring_documents;
   }
   std::vector<Input> cursors;
   cursors.reserve(inputs.size());
@@ -166,9 +169,7 @@ Result<format::FieldMetadata> MergeFtsField(
   }
   const uint64_t target_rows = rows - deletions.cardinality();
   metadata.scoring_document_count =
-      policy == FtsMergePolicy::kRewrite
-          ? inputs.front()->statistics().scoring_documents
-          : target_rows;
+      policy == FtsMergePolicy::kCompact ? target_rows : scoring_documents;
   metadata.total_tokens = metadata.present_count = 0;
   // Validate each source's exact statistics and establish target counts before
   // constructing the writer/scorer. No per-row remap or length vector exists.
@@ -194,8 +195,8 @@ Result<format::FieldMetadata> MergeFtsField(
       return tl::make_unexpected(Corrupt());
     }
   }
-  auto writer =
-      FtsFieldWriter::Create(target_rows, std::move(metadata), params);
+  auto writer = FtsFieldWriter::Create(target_rows, std::move(metadata), params,
+                                       container->workspace());
   if (!writer) {
     return tl::make_unexpected(writer.error());
   }

@@ -44,9 +44,11 @@ struct ManifestData {
   // Once explicit commit records are in use, keep the old-reader gate even
   // if a later DDL removes the last custom FTS base.
   bool requires_commit_record{false};
+  bool writing_protocol{false};
   // A crash after gating the legacy numbered checkpoint but before installing
   // manifest.current leaves this one recoverable kind of gated manifest.
   bool bootstrap_baseline{false};
+  bool use_fts_runs{false};
   CollectionSchema::Ptr schema;
   bool enable_mmap{false};
   std::vector<SegmentMeta::Ptr> persisted_segment_metas;
@@ -58,6 +60,7 @@ struct ManifestData {
 
 //! Converts between ManifestData and its on-disk byte representation.
 struct ManifestCodec {
+  static std::array<uint8_t, 32> SchemaIdentity(const CollectionSchema &schema);
   //! Serializes a manifest. Appends to `out`.
   static Status Encode(const ManifestData &data, std::string *out);
 

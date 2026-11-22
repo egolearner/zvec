@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdlib>
+#include <tuple>
 #include <gtest/gtest.h>
 #include "db/common/file_helper.h"
 #include "db/index/common/version_manager.h"
@@ -284,7 +286,7 @@ TEST(VersionPublicationTest, BootstrapGatePrecedesAuthorityAndEveryCandidate) {
       EXPECT_EQ("legacy", source.schema().name());
       const bool gated =
           file != "manifest.0" || stage == DurableFile::Stage::kDirectorySync;
-      EXPECT_EQ(gated, source.requires_commit_record());
+      EXPECT_EQ(gated, source.writing_protocol());
       ASSERT_TRUE((*restored)->commit(candidate).ok());
       auto done = VersionManager::Recovery(path);
       ASSERT_TRUE(done.has_value());
@@ -293,6 +295,99 @@ TEST(VersionPublicationTest, BootstrapGatePrecedesAuthorityAndEveryCandidate) {
     }
   }
 }
+
+TEST(VersionPublicationTest, FreshRunDatabaseRequiresAuthoritativeFirstCommit) {
+  const std::string path = "version_initial_runs.fixture";
+  FileHelper::RemoveDirectory(path);
+  ASSERT_TRUE(FileHelper::CreateDirectory(path));
+  Version initial;
+  initial.set_schema(CollectionSchema("new"));
+  initial.set_use_fts_runs(true);
+  auto manager = VersionManager::Create(path, initial);
+  ASSERT_TRUE(manager.has_value());
+  auto fail_authority = [&](auto stage, const auto &target) {
+    return stage == DurableFile::Stage::kRename &&
+                   target == path + "/manifest.current"
+               ? Status::InternalError("injected")
+               : Status::OK();
+  };
+  EXPECT_FALSE((*manager)->checkpoint(initial, fail_authority).ok());
+  EXPECT_FALSE(VersionManager::Recovery(path).has_value());
+  ASSERT_TRUE((*manager)->checkpoint(initial).ok());
+  auto reopened = VersionManager::Recovery(path);
+  ASSERT_TRUE(reopened.has_value());
+  EXPECT_TRUE((*reopened)->get_current_version().use_fts_runs());
+  EXPECT_TRUE(FileHelper::RemoveDirectory(path));
+}
+
+#if GTEST_HAS_DEATH_TEST
+class FtsUpgradePublicationDeathTest
+    : public testing::TestWithParam<std::tuple<unsigned, DurableFile::Stage>> {
+};
+
+TEST_P(FtsUpgradePublicationDeathTest, ReopensAtLastPublishedAuthority) {
+  testing::FLAGS_gtest_death_test_style = "threadsafe";
+  const auto file = std::get<0>(GetParam());
+  const auto stop = std::get<1>(GetParam());
+  const auto path = "fts_upgrade_crash_" + std::to_string(file) + "_" +
+                    std::to_string(static_cast<unsigned>(stop)) + ".fixture";
+  const auto crash = [&] {
+    FileHelper::RemoveDirectory(path);
+    if (!FileHelper::CreateDirectory(path)) {
+      return 1;
+    }
+    Version initial;
+    initial.set_schema(CollectionSchema("legacy"));
+    auto manager = VersionManager::Create(path, initial);
+    if (!manager || !(*manager)->flush().ok()) {
+      return 2;
+    }
+    auto candidate = initial.clone();
+    candidate.set_schema(CollectionSchema("runs"));
+    candidate.set_use_fts_runs(true);
+    // The bootstrap and final commits replace manifest.current separately.
+    unsigned replacement = 0;
+    auto stop_before = [&](DurableFile::Stage stage, const std::string &) {
+      if (stage == DurableFile::Stage::kWrite) {
+        ++replacement;
+      }
+      if (replacement == file && stage == stop) {
+        std::_Exit(42);
+      }
+      return Status::OK();
+    };
+    (*manager)->commit(candidate, stop_before);
+    return 3;
+  };
+  ASSERT_EXIT(std::_Exit(crash()), testing::ExitedWithCode(42), "");
+
+  auto reopened = VersionManager::Recovery(path);
+  ASSERT_TRUE(reopened.has_value()) << reopened.error().message();
+  auto version = (*reopened)->get_current_version();
+  const bool new_writer =
+      file == 4 && stop == DurableFile::Stage::kDirectorySync;
+  EXPECT_EQ(new_writer ? "runs" : "legacy", version.schema().name());
+  EXPECT_EQ(new_writer, version.use_fts_runs());
+  const bool gated = file > 1 || stop == DurableFile::Stage::kDirectorySync;
+  EXPECT_EQ(gated, version.writing_protocol());
+  version.set_schema(CollectionSchema("retry"));
+  version.set_use_fts_runs(true);
+  ASSERT_TRUE((*reopened)->commit(version).ok());
+  auto retry = VersionManager::Recovery(path);
+  ASSERT_TRUE(retry.has_value()) << retry.error().message();
+  EXPECT_EQ("retry", (*retry)->get_current_version().schema().name());
+  EXPECT_TRUE((*retry)->get_current_version().use_fts_runs());
+  EXPECT_TRUE(FileHelper::RemoveDirectory(path));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AcrossBootstrapAndCommit, FtsUpgradePublicationDeathTest,
+    testing::Combine(testing::Range(1u, 5u),
+                     testing::Values(DurableFile::Stage::kWrite,
+                                     DurableFile::Stage::kFileSync,
+                                     DurableFile::Stage::kRename,
+                                     DurableFile::Stage::kDirectorySync)));
+#endif
 
 }  // namespace
 }  // namespace zvec

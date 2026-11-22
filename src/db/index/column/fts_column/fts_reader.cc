@@ -139,8 +139,8 @@ class CustomReader final : public FtsSegmentReader {
   BM25ScorerPtr scorer() const override {
     return scorer_;
   }
-  bool supports_batches() const override {
-    return true;
+  bool supports_batches(bool filtered) const override {
+    return !filtered;
   }
   Result<FtsReadTerm::Ptr> lookup(std::string_view term) const override {
     auto found = field_->lookup(term);

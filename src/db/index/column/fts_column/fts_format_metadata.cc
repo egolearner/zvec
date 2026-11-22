@@ -25,6 +25,7 @@ constexpr uint32_t kHeaderSize = 40;
 constexpr uint32_t kBaseRecord = 1;
 constexpr uint32_t kFieldRecord = 2;
 constexpr uint32_t kSectionRecord = 3;
+constexpr uint32_t kDocumentDomainRecord = 4;
 constexpr uint32_t kRequiredRecord = 1;
 
 Status Corrupt() {
@@ -63,8 +64,15 @@ std::string GetString(Decoder *decoder) {
 }
 
 Status Validate(const Metadata &meta) {
-  if (meta.required_features != 0) {
+  if ((meta.required_features & ~kRunLocalDocids) != 0) {
     return Status::NotSupported("Unknown required FTS feature");
+  }
+  if (meta.parent_row_begin.has_value() !=
+          ((meta.required_features & kRunLocalDocids) != 0) ||
+      (meta.parent_row_begin &&
+       (meta.row_count == 0 ||
+        !ValidRange(*meta.parent_row_begin, meta.row_count, UINT32_MAX)))) {
+    return Status::InvalidArgument("Invalid FTS writing run row domain");
   }
   if (!Nonzero(meta.base_id) || meta.row_count > UINT32_MAX ||
       meta.layout_granule < 1024 || meta.layout_granule > 65536 ||
@@ -170,7 +178,7 @@ Result<std::string> EncodeMetadata(const Metadata &meta, size_t budget) {
   AppendU32(meta.block_id, &base);
   AppendU64(meta.source_segment_id, &base);
   AppendU64(meta.row_count, &base);
-  AppendU32(1, &base);  // parent segment-local row mapping
+  AppendU32(meta.parent_row_begin ? 2 : 1, &base);
   AppendU32(meta.layout_granule, &base);
   AppendU32(static_cast<uint32_t>(meta.fields.size()), &base);
   AppendU32(static_cast<uint32_t>(meta.sections.size()), &base);
@@ -179,6 +187,14 @@ Result<std::string> EncodeMetadata(const Metadata &meta, size_t budget) {
     return tl::make_unexpected(status);
   }
   uint32_t ordinal = 0;
+  if (meta.parent_row_begin) {
+    std::string domain;
+    AppendU64(*meta.parent_row_begin, &domain);
+    status = PutRecord(kDocumentDomainRecord, domain, budget, &out);
+    if (!status.ok()) {
+      return tl::make_unexpected(status);
+    }
+  }
   for (const auto &field : meta.fields) {
     std::string payload;
     AppendU32(ordinal++, &payload);
@@ -259,7 +275,8 @@ Result<Metadata> DecodeMetadata(std::string_view bytes, size_t budget) {
   meta.optional_features = decoder.u64();
   const auto minimum_reader = decoder.u32();
   const auto header_size = decoder.u32();
-  if (major != 1 || minimum_reader > 1 || meta.required_features != 0) {
+  if (major != 1 || minimum_reader > 1 ||
+      (meta.required_features & ~kRunLocalDocids) != 0) {
     return tl::make_unexpected(
         Status::NotSupported("Unknown required FTS format"));
   }
@@ -295,13 +312,20 @@ Result<Metadata> DecodeMetadata(std::string_view bytes, size_t budget) {
       meta.layout_granule = record.u32();
       field_count = record.u32();
       section_count = record.u32();
-      if (mapping != 1 && record.ok()) {
+      if (mapping != ((meta.required_features & kRunLocalDocids) ? 2u : 1u) &&
+          record.ok()) {
         return tl::make_unexpected(
             Status::NotSupported("Unknown FTS row mapping"));
       }
       if (field_count > kMaxFields || section_count > kMaxSections) {
         return tl::make_unexpected(BudgetExceeded());
       }
+    } else if (type == kDocumentDomainRecord) {
+      if (!have_base || meta.parent_row_begin || flags != kRequiredRecord ||
+          (meta.required_features & kRunLocalDocids) == 0) {
+        return tl::make_unexpected(Corrupt());
+      }
+      meta.parent_row_begin = record.u64();
     } else if (type == kFieldRecord) {
       if (!have_base || meta.fields.size() >= field_count ||
           record.u32() != meta.fields.size()) {

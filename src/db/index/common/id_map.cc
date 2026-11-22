@@ -94,6 +94,12 @@ Status IDMap::flush() {
   return s;
 }
 
+Status IDMap::create_snapshot(const std::string &directory) {
+  return opened_
+             ? rocksdb_context_.create_checkpoint(directory)
+             : Status::FailedPrecondition("Cannot snapshot a closed ID map");
+}
+
 
 Status IDMap::upsert(const std::string &key, uint64_t doc_id) {
   if (!opened_) {
@@ -113,8 +119,9 @@ Status IDMap::upsert(const std::string &key, uint64_t doc_id) {
 }
 
 
-void IDMap::remove(const std::string &key) {
-  rocksdb_context_.db_->Delete(rocksdb_context_.write_opts_, key);
+Status IDMap::remove(const std::string &key) {
+  auto status = rocksdb_context_.db_->Delete(rocksdb_context_.write_opts_, key);
+  return status.ok() ? Status::OK() : Status::InternalError(status.ToString());
 }
 
 

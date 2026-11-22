@@ -26,6 +26,9 @@ namespace zvec::fts {
  */
 class AsciiFoldingTokenFilter : public TokenFilter {
  public:
+  Status validate_streaming() const override {
+    return Status::OK();
+  }
   std::vector<Token> filter(std::vector<Token> tokens) const override;
 
   const char *name() const override {
