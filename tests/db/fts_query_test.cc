@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -24,7 +26,9 @@
 #include <zvec/ailego/utility/file_helper.h>
 #include "db/common/file_helper.h"
 #include "db/fts_writing_collection.h"
+#include "db/index/column/fts_column/fts_file_lifetime.h"
 #include "db/index/common/version_manager.h"
+#include "db/index/storage/wal/wal_file.h"
 #include "zvec/db/collection.h"
 #include "zvec/db/doc.h"
 #include "zvec/db/index_params.h"
@@ -126,6 +130,53 @@ TEST_F(FtsQueryTest, BasicFtsQuery) {
   ASSERT_LE(results.size(), 3u);
 }
 
+TEST_F(FtsQueryTest, OversizedJiebaModelIsRejectedBeforeLoading) {
+  const auto dir = kTestPath + ".dict";
+  std::filesystem::create_directories(dir);
+  auto cleanup = fts::FtsRetirementQueue::Create()->track(dir, true, true);
+  const auto file = dir + "/jieba.dict.utf8";
+  {
+    std::ofstream dict(file);
+    ASSERT_TRUE(dict << "中国 1 n\n");
+  }
+  std::filesystem::resize_file(file, (64u << 20) + 1);
+  CollectionSchema schema("oversized_model");
+  auto params = std::make_shared<FtsIndexParams>(
+      "jieba", std::vector<std::string>{},
+      R"({"cut_mode":"full","jieba_dict_dir":")" + dir + R"("})");
+  ASSERT_TRUE(schema
+                  .add_field(std::make_shared<FieldSchema>(
+                      "content", DataType::STRING, true, params))
+                  .ok());
+  auto refused = internal::CreateFtsWritingCollection(kTestPath, schema, {});
+  ASSERT_FALSE(refused);
+  EXPECT_EQ(StatusCode::RESOURCE_EXHAUSTED, refused.error().code());
+}
+
+#ifdef _WIN32
+TEST_F(FtsQueryTest, UnsupportedRunPublicationPreservesLegacyData) {
+  auto schema = CreateFtsSchema();
+  auto denied = internal::CreateFtsWritingCollection(kTestPath, *schema, {});
+  ASSERT_FALSE(denied);
+  EXPECT_EQ(denied.error().code(), StatusCode::NOT_SUPPORTED);
+  FileHelper::RemoveDirectory(kTestPath);
+  auto legacy = Collection::CreateAndOpen(kTestPath, *schema, {});
+  ASSERT_TRUE(legacy);
+  std::vector<Doc> docs{MakeDoc(1, "previous", "unchanged")};
+  auto inserted = (*legacy)->insert(docs);
+  ASSERT_TRUE(inserted && inserted->front().ok());
+  ASSERT_TRUE((*legacy)->flush().ok());
+  EXPECT_EQ(internal::MigrateFtsWritingCollection(**legacy).code(),
+            StatusCode::NOT_SUPPORTED);
+  ASSERT_TRUE((*legacy)->close().ok());
+  legacy->reset();
+  auto reopened = Collection::Open(kTestPath, {});
+  ASSERT_TRUE(reopened);
+  auto rows = (*reopened)->fetch({"pk_1"});
+  ASSERT_TRUE(rows && rows->at("pk_1"));
+  EXPECT_EQ("previous", rows->at("pk_1")->get_ref<std::string>("title"));
+}
+#else
 TEST_F(FtsQueryTest, RunWriterCheckpointReplacementAndSeal) {
   for (bool mmap : {false, true}) {
     SCOPED_TRACE(mmap);
@@ -160,8 +211,19 @@ TEST_F(FtsQueryTest, RunWriterCheckpointReplacementAndSeal) {
     ASSERT_TRUE(written->at(0).ok());
     ASSERT_TRUE(written->at(1).ok());
     check("red", {"pk_1", "pk_2"});
+    const auto dir = FileHelper::MakeSegmentPath(kTestPath, 0);
+    const auto epoch = FileHelper::MakeWalEpochPath(dir, 1);
+    auto queue = fts::FtsRetirementQueue::ForDirectory(kTestPath);
+    auto pin = queue->track(epoch, false, false);
+    const auto wal_bytes = std::filesystem::file_size(epoch);
+    ASSERT_GT(wal_bytes, 0u);
     auto status = collection->flush();
     ASSERT_TRUE(status.ok()) << status.message();
+    EXPECT_EQ(wal_bytes, queue->retired_bytes());
+    EXPECT_TRUE(FileHelper::FileExists(epoch));
+    pin.reset();
+    EXPECT_EQ(0u, queue->retired_bytes());
+    EXPECT_FALSE(FileHelper::FileExists(epoch));
     check("red", {"pk_1", "pk_2"});
     docs = {MakeDoc(1, "replaced", "green")};
     auto changed = collection->upsert(docs);
@@ -191,6 +253,11 @@ TEST_F(FtsQueryTest, RunWriterCheckpointReplacementAndSeal) {
       ASSERT_TRUE(entry.ok()) << entry.message();
     }
     check("green", {"pk_1", "pk_3", "pk_4"});
+    for (const auto &entry : std::filesystem::directory_iterator(
+             FileHelper::MakeSegmentPath(kTestPath, 0))) {
+      EXPECT_NE(0u, entry.path().filename().u8string().find("wal.epoch."))
+          << entry.path();
+    }
     status = collection->close();
     ASSERT_TRUE(status.ok()) << status.message();
     collection.reset();
@@ -238,6 +305,24 @@ TEST_F(FtsQueryTest, LegacyMigrationAndIndependentSnapshot) {
     query.topk_ = 10;
     auto before = source->query(query);
     ASSERT_TRUE(before && before->size() == 2);
+    ASSERT_TRUE(source->flush().ok());
+    auto dir = FileHelper::MakeSegmentPath(kTestPath, 0);
+    for (const uint64_t epoch : {1, 3}) {
+      WalOptions abandoned;
+      abandoned.epoch = epoch;
+      abandoned.create_new = true;
+      WalFilePtr wal;
+      ASSERT_EQ(0,
+                WalFile::CreateAndOpen(FileHelper::MakeWalEpochPath(dir, epoch),
+                                       abandoned, &wal));
+      ASSERT_EQ(0, wal->flush());
+      ASSERT_EQ(0, wal->close());
+    }
+    ASSERT_TRUE(source->close().ok());
+    source.reset();
+    auto legacy = Collection::Open(kTestPath, options);
+    ASSERT_TRUE(legacy) << legacy.error().message();
+    source = std::move(*legacy);
     auto status = internal::MigrateFtsWritingCollection(*source);
     ASSERT_TRUE(status.ok()) << status.message();
     auto compare = [&](Collection &collection) {
@@ -372,6 +457,8 @@ TEST_F(FtsQueryTest, ConcurrentReadsNeverObserveAPartialReplacement) {
   }
   reader.join();
 }
+
+#endif  // _WIN32
 
 TEST_F(FtsQueryTest, NGramTokenizerEndToEnd) {
   auto schema = CreateNGramFtsSchema();

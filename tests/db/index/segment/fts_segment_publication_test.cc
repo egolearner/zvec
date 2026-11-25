@@ -1342,13 +1342,25 @@ TEST_P(FtsSegmentPublicationTest, RejectedWalRecordReleasesPreparedDocument) {
                   .add_field(std::make_shared<FieldSchema>(
                       "payload", DataType::STRING, true))
                   .ok());
-  auto db = internal::CreateFtsWritingCollection(path_ + "/retry", schema, {});
+  auto path = path_ + "/retry";
+  CollectionOptions options{false, GetParam()};
+  auto db = internal::CreateFtsWritingCollection(path, schema, options);
   ASSERT_TRUE(db) << db.error().message();
-  std::vector<Doc> docs(1);
-  docs.front().set_pk("accepted");
-  docs.front().set("text", std::string("visible"));
+  std::vector<Doc> docs;
+  for (const char *key : {"first", "second", "third"}) {
+    auto &doc = docs.emplace_back();
+    doc.set_pk(key);
+    doc.set("text", std::string(key));
+  }
   auto accepted = (*db)->insert(docs);
-  ASSERT_TRUE(accepted && accepted->size() == 1 && accepted->front().ok());
+  ASSERT_TRUE(accepted && accepted->size() == 3);
+  for (const auto &row : *accepted) {
+    ASSERT_TRUE(row.ok());
+  }
+  ASSERT_TRUE((*db)->flush().ok());
+  auto deleted = (*db)->delete_({"first"});
+  ASSERT_TRUE(deleted && deleted->front().ok());
+  docs.resize(1);
   docs.front().set_pk("too-large");
   docs.front().set("payload", std::string(64u << 20, 'x'));
   auto rejected = (*db)->insert(docs);
@@ -1356,15 +1368,24 @@ TEST_P(FtsSegmentPublicationTest, RejectedWalRecordReleasesPreparedDocument) {
   ASSERT_NE(rejected->front().message().find("Invalid WAL operation"),
             std::string::npos);
   ASSERT_TRUE((*db)->flush().ok());
-  docs.front().set_pk("retry");
+  ASSERT_TRUE((*db)->close().ok());
+  db->reset();
+  db = Collection::Open(path, options);
+  ASSERT_TRUE(db) << db.error().message();
+  docs.front().set_pk("fourth");
   docs.front().set("payload", std::string("small"));
+  docs.front().set("text", std::string("fourth"));
   auto retried = (*db)->insert(docs);
   ASSERT_TRUE(retried && retried->size() == 1 && retried->front().ok());
-  auto rows = (*db)->fetch({"accepted", "retry", "too-large"});
+  auto rows = (*db)->fetch({"second", "third", "fourth", "too-large", "first"});
   ASSERT_TRUE(rows);
-  EXPECT_NE(rows->at("accepted"), nullptr);
-  EXPECT_NE(rows->at("retry"), nullptr);
-  EXPECT_EQ(rows->at("too-large"), nullptr);
+  for (const char *key : {"second", "third", "fourth"}) {
+    ASSERT_TRUE(rows->at(key)) << key;
+    EXPECT_EQ(key, rows->at(key)->pk_ref());
+    EXPECT_EQ(key, rows->at(key)->get_ref<std::string>("text"));
+  }
+  EXPECT_FALSE(rows->at("too-large"));
+  EXPECT_FALSE(rows->at("first"));
 }
 
 TEST(FtsWritingRecoveryTest, CorruptCompleteEpochLeavesCommittedStateIntact) {

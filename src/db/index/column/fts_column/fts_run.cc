@@ -43,7 +43,7 @@ format::Identity FieldIdentity(const format::Identity &writer_id,
 }
 
 // Adds physical provenance to the local field source. Coalescing can reject
-// a reordered or foreign run before opening a posting cursor or creating files.
+// a reordered or foreign run before opening a posting cursor for the field.
 class RunSource final : public FtsFieldSource {
  public:
   RunSource(FtsFieldSource::Ptr source, FtsContainerReader::Pointer container,
@@ -92,51 +92,46 @@ class RunSource final : public FtsFieldSource {
   uint32_t ordinal_;
 };
 
-Result<uint32_t> ValidateSources(
-    uint64_t segment, uint32_t block, uint32_t begin,
-    const std::vector<std::vector<FtsFieldSource::Ptr>> &sources,
-    const format::Identity &writer_id) {
-  if (sources.empty() || sources.size() > format::kMaxFields ||
-      sources.front().empty() || sources.front().size() > 4) {
+Result<uint32_t> ValidateField(uint64_t segment, uint32_t block, uint32_t begin,
+                               uint32_t f, const FtsRun::FieldSources &sources,
+                               const format::Identity &writer_id,
+                               std::vector<uint32_t> *segment_rows) {
+  if (sources.empty() || sources.size() > 4 ||
+      (f != 0 && sources.size() != segment_rows->size())) {
     return tl::make_unexpected(Status::InvalidArgument("Invalid run fan-in"));
   }
+  segment_rows->resize(sources.size());
   uint64_t end = begin;
-  for (uint32_t f = 0; f < sources.size(); ++f) {
-    if (sources[f].size() != sources.front().size()) {
+  for (size_t i = 0; i < sources.size(); ++i) {
+    const auto &source = sources[i];
+    if (!source || source->statistics().rows == 0 ||
+        (f != 0 && source->statistics().rows != (*segment_rows)[i]) ||
+        !format::ValidRange(end, source->statistics().rows, UINT32_MAX)) {
       return tl::make_unexpected(
-          Status::InvalidArgument("Mismatched run fields"));
+          Status::InvalidArgument("Invalid run row domain"));
     }
-    end = begin;
-    for (size_t i = 0; i < sources[f].size(); ++i) {
-      const auto &source = sources[f][i];
-      if (!source || source->statistics().rows == 0 ||
-          source->statistics().rows != sources.front()[i]->statistics().rows ||
-          !format::ValidRange(end, source->statistics().rows, UINT32_MAX)) {
-        return tl::make_unexpected(
-            Status::InvalidArgument("Invalid run row domain"));
-      }
-      const auto *run = dynamic_cast<const RunSource *>(source.get());
-      const auto &first = sources[f].front()->metadata();
-      const auto &field = source->metadata();
-      if (run && i == 0 && writer_id != format::Identity{} &&
-          (field.id != FieldIdentity(writer_id, "field", f) ||
-           field.incarnation != FieldIdentity(writer_id, "incarnation", f))) {
-        return tl::make_unexpected(
-            Status::InvalidArgument("Run does not belong to this writer"));
-      }
-      if ((!run && sources[f].size() != 1) ||
-          (run && !run->matches(segment, block, end, f)) ||
-          field.name != first.name ||
-          field.analysis_identity != first.analysis_identity ||
-          field.id != first.id || field.incarnation != first.incarnation ||
-          ((field.id == format::Identity{}) !=
-           (field.incarnation == format::Identity{})) ||
-          (field.id == format::Identity{} && writer_id == format::Identity{})) {
-        return tl::make_unexpected(
-            Status::InvalidArgument("Incompatible run source identity"));
-      }
-      end += source->statistics().rows;
+    const auto *run = dynamic_cast<const RunSource *>(source.get());
+    const auto &first = sources.front()->metadata();
+    const auto &field = source->metadata();
+    if (run && i == 0 && writer_id != format::Identity{} &&
+        (field.id != FieldIdentity(writer_id, "field", f) ||
+         field.incarnation != FieldIdentity(writer_id, "incarnation", f))) {
+      return tl::make_unexpected(
+          Status::InvalidArgument("Run does not belong to this writer"));
     }
+    if ((!run && sources.size() != 1) ||
+        (run && !run->matches(segment, block, end, f)) ||
+        field.name != first.name ||
+        field.analysis_identity != first.analysis_identity ||
+        field.id != first.id || field.incarnation != first.incarnation ||
+        ((field.id == format::Identity{}) !=
+         (field.incarnation == format::Identity{})) ||
+        (field.id == format::Identity{} && writer_id == format::Identity{})) {
+      return tl::make_unexpected(
+          Status::InvalidArgument("Incompatible run source identity"));
+    }
+    (*segment_rows)[i] = source->statistics().rows;
+    end += source->statistics().rows;
   }
   return static_cast<uint32_t>(end - begin);
 }
@@ -157,21 +152,30 @@ Result<FtsRun::Ptr> FtsRun::Write(
     const FtsRetirementQueue::Pointer &retirement,
     const std::shared_ptr<FtsReadBudget> &read_budget,
     const format::Identity &writer_id, uint64_t temporary_bytes) {
+  return Write(
+      segment_path, mmap, segment_id, block_id, parent_begin, sources.size(),
+      [&](uint32_t field) { return sources[field]; }, retirement, read_budget,
+      writer_id, temporary_bytes);
+}
+
+Result<FtsRun::Ptr> FtsRun::Write(
+    const std::string &segment_path, bool mmap, uint64_t segment_id,
+    uint32_t block_id, uint32_t parent_begin, size_t field_count,
+    const OpenField &open_field, const FtsRetirementQueue::Pointer &retirement,
+    const std::shared_ptr<FtsReadBudget> &read_budget,
+    const format::Identity &writer_id, uint64_t temporary_bytes) {
   if (!retirement || !read_budget || segment_path.empty()) {
     return tl::make_unexpected(
         Status::InvalidArgument("Missing run workspace"));
   }
-  auto rows =
-      ValidateSources(segment_id, block_id, parent_begin, sources, writer_id);
-  if (!rows) {
-    return tl::make_unexpected(rows.error());
+  if (field_count == 0 || field_count > format::kMaxFields || !open_field) {
+    return tl::make_unexpected(
+        Status::InvalidArgument("Invalid run field count"));
   }
-
   FtsRunDescriptor descriptor;
   descriptor.id = NewFtsIdentity();
   descriptor.generation = 1;
   descriptor.parent_begin = parent_begin;
-  descriptor.rows = *rows;
   const auto path = FileHelper::MakeFtsRunPath(
       segment_path, block_id, descriptor.generation, descriptor.id);
   const auto reservation = path + ".reserved";
@@ -213,25 +217,36 @@ Result<FtsRun::Ptr> FtsRun::Write(
     metadata.source_segment_id = segment_id;
     metadata.block_id = block_id;
     metadata.parent_row_begin = parent_begin;
-    metadata.row_count = *rows;
-    for (uint32_t f = 0; f < sources.size(); ++f) {
-      auto field = sources[f].front()->metadata();
+    std::vector<uint32_t> segment_rows;
+    for (uint32_t f = 0; f < field_count; ++f) {
+      auto sources = open_field(f);
+      if (!sources) {
+        return tl::make_unexpected(sources.error());
+      }
+      auto rows = ValidateField(segment_id, block_id, parent_begin, f, *sources,
+                                writer_id, &segment_rows);
+      if (!rows) {
+        return tl::make_unexpected(rows.error());
+      }
+      descriptor.rows = *rows;
+      metadata.row_count = *rows;
+      auto field = sources->front()->metadata();
       // Import and active sources enter this writing field's incarnation.
       // Coalescing already-bound run sources preserves that identity.
-      if (!dynamic_cast<const RunSource *>(sources[f].front().get()) &&
+      if (!dynamic_cast<const RunSource *>(sources->front().get()) &&
           writer_id != format::Identity{}) {
         field.id = FieldIdentity(writer_id, "field", f);
         field.incarnation = FieldIdentity(writer_id, "incarnation", f);
       }
       // Ordinals bind to the new base UUID and dictionary generation.
       field.dictionary_generation = descriptor.generation;
-      auto frozen =
-          sources[f].size() == 1
-              ? dynamic_cast<const FtsFrozenFieldSource *>(sources[f][0].get())
-              : nullptr;
+      auto frozen = sources->size() == 1
+                        ? dynamic_cast<const FtsFrozenFieldSource *>(
+                              sources->front().get())
+                        : nullptr;
       auto written =
           frozen ? frozen->write_field(std::move(field), writer->get(), f)
-                 : MergeFtsField(sources[f], {}, FtsMergePolicy::kCoalesceRuns,
+                 : MergeFtsField(*sources, {}, FtsMergePolicy::kCoalesceRuns,
                                  std::move(field), writer->get(), f);
       if (!written) {
         return tl::make_unexpected(written.error());
@@ -321,7 +336,7 @@ Result<FtsRun::Ptr> FtsRun::OpenFile(const std::string &path,
   }
   run->path_ = path;
   run->descriptor_ = descriptor;
-  owner->register_run(descriptor.file_size);
+  owner->register_bytes(descriptor.file_size);
   run->owner_ = std::move(owner);
   run->container_ = std::move(container);
   return run;

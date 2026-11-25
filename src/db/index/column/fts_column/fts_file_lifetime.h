@@ -41,8 +41,8 @@ class FtsFileOwner {
   // Only call after a new authoritative version no longer references this
   // generation. Actual removal waits for every reader/range/snapshot pin.
   void retire() noexcept;
-  // Register once the complete run size is known, including on reopen.
-  void register_run(uint64_t bytes);
+  // Register once the immutable file size is known, including on reopen.
+  void register_bytes(uint64_t bytes);
 
  private:
   friend class FtsRetirementQueue;

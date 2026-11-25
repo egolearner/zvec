@@ -264,6 +264,7 @@ class Segment {
     // Null after the collection has dropped its last FTS index; explicit
     // authority still requires durable switching for its remaining stores.
     FtsIndexer::Ptr indexer;
+    fts::FtsFileOwner::Pointer retired_wal{};
   };
 
   // The collection holds write/schema exclusion across preparation, version

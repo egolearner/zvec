@@ -222,10 +222,10 @@ static fts::FtsIndexParams to_internal(const FtsIndexParams &params) {
 }
 
 Status FtsIndexParams::validate() const {
-  auto pipeline = fts::TokenizerFactory::create(to_internal(*this));
-  if (!pipeline.has_value()) {
+  auto status = fts::TokenizerFactory::validate(to_internal(*this));
+  if (!status.ok()) {
     return Status::InvalidArgument("invalid FTS index params: ",
-                                   pipeline.error().message());
+                                   status.message());
   }
   return Status::OK();
 }

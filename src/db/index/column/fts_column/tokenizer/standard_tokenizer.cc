@@ -928,6 +928,85 @@ Status analyze_ascii(std::string_view text, uint32_t max_token_length,
   return Status::OK();
 }
 
+// One scanner step, including ignored spans. Both complete and bounded
+// tokenization must agree on the natural boundary before max_token_length
+// splits the span into emitted tokens.
+struct UnicodeSpan {
+  size_t end;
+  bool emit;
+};
+
+UnicodeSpan scan_unicode_span(const std::vector<StandardCodepoint> &points,
+                              size_t start) {
+  const auto cls = points[start].cls;
+  if (cls == WordBreakClass::Ideographic || cls == WordBreakClass::Hiragana) {
+    return {scan_single_token(points, start), true};
+  }
+  if (cls == WordBreakClass::Hangul || cls == WordBreakClass::SoutheastAsian) {
+    return {scan_word_token(points, start), true};
+  }
+  if (cls == WordBreakClass::RegionalIndicator) {
+    return {scan_regional_indicator_token(points, start), true};
+  }
+  auto end = scan_keycap_token(points, start);
+  if (end > start) {
+    return {end, true};
+  }
+  if (cls == WordBreakClass::ExtendedPictographic) {
+    return {scan_emoji_token(points, start), true};
+  }
+  if (cls == WordBreakClass::ZWJ) {
+    end = scan_zwj_ext_pict_token(points, start);
+    if (end > start) {
+      return {end, true};
+    }
+  }
+  end = scan_emoji_modifier_token(points, start);
+  if (end > start) {
+    return {end, true};
+  }
+  if (cls == WordBreakClass::ExtendNumLet) {
+    end = scan_word_token(points, start);
+    return {end, span_has_core_token(points, start, end)};
+  }
+  if (is_token_start(cls)) {
+    return {scan_word_token(points, start), true};
+  }
+  return {start + 1, false};
+}
+
+size_t tokenize_unicode_prefix(const std::string &text, uint32_t max_length,
+                               bool more, std::vector<Token> *tokens) {
+  const auto points = decode_standard_utf8(text);
+  size_t stop = points.size();
+  if (more) {
+    // A join across punctuation looks ahead to the next non-ignored
+    // codepoint. Keep two such points in the next window, discounting the
+    // final three bytes which may contain an incomplete UTF-8 sequence.
+    size_t lookahead = 0;
+    while (stop > 0 && lookahead < 2) {
+      const auto &point = points[--stop];
+      if (text.size() - point.end >= 3 && !is_ignored(point.cls)) {
+        ++lookahead;
+      }
+    }
+  }
+  uint32_t position = 0;
+  size_t start = 0;
+  while (start < stop) {
+    const auto span = scan_unicode_span(points, start);
+    if (span.end > stop) {
+      break;
+    }
+    if (span.emit) {
+      emit_token_span(text, points, start, span.end, max_length, &position,
+                      tokens);
+    }
+    start = span.end;
+  }
+  return start == points.size() ? text.size() : points[start].start;
+}
+
 }  // namespace
 
 Status StandardTokenizer::init(const ailego::JsonObject &config) {
@@ -969,93 +1048,14 @@ std::vector<Token> StandardTokenizer::tokenize_unicode(
     const std::string &text) const {
   std::vector<Token> tokens;
   tokens.reserve(estimate_token_capacity(text.size()));
-  uint32_t position = 0;
-  std::vector<StandardCodepoint> codepoints = decode_standard_utf8(text);
-
-  size_t index = 0;
-  while (index < codepoints.size()) {
-    WordBreakClass cls = codepoints[index].cls;
-    if (cls == WordBreakClass::Ideographic || cls == WordBreakClass::Hiragana) {
-      size_t end = scan_single_token(codepoints, index);
-      emit_token_span(text, codepoints, index, end, max_token_length_,
-                      &position, &tokens);
-      index = end;
-      continue;
-    }
-    if (cls == WordBreakClass::Hangul ||
-        cls == WordBreakClass::SoutheastAsian) {
-      size_t end = scan_word_token(codepoints, index);
-      emit_token_span(text, codepoints, index, end, max_token_length_,
-                      &position, &tokens);
-      index = end;
-      continue;
-    }
-    if (cls == WordBreakClass::RegionalIndicator) {
-      size_t end = scan_regional_indicator_token(codepoints, index);
-      emit_token_span(text, codepoints, index, end, max_token_length_,
-                      &position, &tokens);
-      index = end;
-      continue;
-    }
-    size_t end = scan_keycap_token(codepoints, index);
-    if (end > index) {
-      emit_token_span(text, codepoints, index, end, max_token_length_,
-                      &position, &tokens);
-      index = end;
-      continue;
-    }
-    if (cls == WordBreakClass::ExtendedPictographic) {
-      end = scan_emoji_token(codepoints, index);
-      emit_token_span(text, codepoints, index, end, max_token_length_,
-                      &position, &tokens);
-      index = end;
-      continue;
-    }
-    if (cls == WordBreakClass::ZWJ) {
-      end = scan_zwj_ext_pict_token(codepoints, index);
-      if (end > index) {
-        emit_token_span(text, codepoints, index, end, max_token_length_,
-                        &position, &tokens);
-        index = end;
-        continue;
-      }
-    }
-    end = scan_emoji_modifier_token(codepoints, index);
-    if (end > index) {
-      emit_token_span(text, codepoints, index, end, max_token_length_,
-                      &position, &tokens);
-      index = end;
-      continue;
-    }
-    if (cls == WordBreakClass::ExtendNumLet) {
-      end = scan_word_token(codepoints, index);
-      if (span_has_core_token(codepoints, index, end)) {
-        emit_token_span(text, codepoints, index, end, max_token_length_,
-                        &position, &tokens);
-      }
-      index = end;
-      continue;
-    }
-    if (!is_token_start(cls)) {
-      ++index;
-      continue;
-    }
-
-    end = scan_word_token(codepoints, index);
-    emit_token_span(text, codepoints, index, end, max_token_length_, &position,
-                    &tokens);
-    index = end;
-  }
-
+  tokenize_unicode_prefix(text, max_token_length_, false, &tokens);
   return tokens;
 }
 
 Status StandardTokenizer::analyze_to(std::string_view text,
                                      const TokenSink &sink,
                                      size_t workspace_bytes) const {
-  // ASCII whitespace is a hard break in both scanners. Keep the original
-  // scanner choice across chunks: a mixed Unicode document uses Unicode
-  // word-boundary rules throughout, including its ASCII runs.
+  // Mixed documents use Unicode word boundaries even in their ASCII runs.
   if (std::all_of(text.begin(), text.end(),
                   [](unsigned char c) { return c < 128; })) {
     return analyze_ascii(text, max_token_length_, sink);
@@ -1064,20 +1064,23 @@ Status StandardTokenizer::analyze_to(std::string_view text,
   // including old/new vector storage during growth and owned token bytes.
   const size_t limit =
       workspace_bytes > 32768 ? (workspace_bytes - 32768) / 256 : 0;
+  if (!limit) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            "Insufficient standard analyzer workspace"};
+  }
   size_t offset = 0;
   uint32_t position = 0;
   while (offset < text.size()) {
-    size_t bytes = std::min(limit, text.size() - offset);
-    if (bytes < text.size() - offset) {
-      const auto last = text.substr(offset, bytes).find_last_of(" \t\r\n");
-      if (last == std::string_view::npos) {
-        return {StatusCode::RESOURCE_EXHAUSTED,
-                "Standard analyzer span exceeds workspace"};
-      }
-      bytes = last + 1;
+    // Allow a few codepoints of lookahead within the fixed workspace
+    // overhead so that even the smallest window can confirm a short token.
+    auto chunk = std::string(text.substr(offset, limit + 16));
+    std::vector<Token> tokens;
+    const auto bytes = tokenize_unicode_prefix(
+        chunk, max_token_length_, chunk.size() < text.size() - offset, &tokens);
+    if (!bytes) {
+      return {StatusCode::RESOURCE_EXHAUSTED,
+              "Standard analyzer span exceeds workspace"};
     }
-    std::string chunk(text.substr(offset, bytes));
-    auto tokens = tokenize_unicode(chunk);
     for (const auto &token : tokens) {
       auto status = sink(
           token.text, static_cast<uint32_t>(offset + token.offset), position++);

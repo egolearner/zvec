@@ -2442,7 +2442,16 @@ Result<Segment::PreparedFtsSeal> SegmentImpl::prepare_fts_seal(
       return tl::make_unexpected(prepared.error());
     }
     block = *(*prepared)->custom_block();
-    return PreparedFtsSeal{std::move(metadata), std::move(*prepared)};
+    fts::FtsFileOwner::Pointer wal;
+    if (const auto *root = segment_meta_->writing_fts_checkpoint();
+        root && wal_file_) {
+      wal = version_manager_->fts_retirement()->track(
+          FileHelper::MakeWalEpochPath(seg_path_, root->wal_epoch), false,
+          false);
+      wal->register_bytes(wal_file_->size_bytes());
+    }
+    return PreparedFtsSeal{std::move(metadata), std::move(*prepared),
+                           std::move(wal)};
   }
   return tl::make_unexpected(Status::InternalError("Missing source FTS block"));
 }
@@ -2565,6 +2574,10 @@ void SegmentImpl::publish_fts_seal(PreparedFtsSeal prepared) {
   }
   auto retired = std::move(fts_indexer_);
   if (writing_fts_) {
+    if (prepared.retired_wal) {
+      wal_file_.reset();
+      prepared.retired_wal->retire();
+    }
     writing_fts_->retire_checkpoint();
     writing_fts_.reset();
   }
@@ -2596,6 +2609,19 @@ Status SegmentImpl::flush_unsafe() {
                           version_manager_->uses_commit_record());
 }
 
+// A crash before the first explicit manifest may leave candidate epochs next
+// to the legacy WAL. The writer lock protects selection and exclusive create.
+static Result<uint64_t> NextWalEpoch(const std::string &dir, uint64_t current) {
+  while (current != UINT64_MAX) {
+    ++current;
+    if (!FileHelper::FileExists(FileHelper::MakeWalEpochPath(dir, current))) {
+      return current;
+    }
+  }
+  return tl::make_unexpected(
+      Status{StatusCode::RESOURCE_EXHAUSTED, "WAL epoch space exhausted"});
+}
+
 Status SegmentImpl::flush_checkpoint(bool durable) {
   // The caller holds seg_mtx_ exclusively across the checkpoint.
   CHECK_SEGMENT_READONLY_RETURN_STATUS;
@@ -2613,8 +2639,13 @@ Status SegmentImpl::flush_checkpoint(bool durable) {
 
   const auto *root = segment_meta_->writing_fts_checkpoint();
   const uint64_t epoch = root ? root->wal_epoch : 0;
-  if (epoch == UINT64_MAX) {
-    return {StatusCode::RESOURCE_EXHAUSTED, "WAL epoch space exhausted"};
+  uint64_t successor_epoch = 0;
+  if (epoch) {
+    auto next = NextWalEpoch(seg_path_, epoch);
+    if (!next) {
+      return next.error();
+    }
+    successor_epoch = *next;
   }
   bool committed = false;
   fts::FtsFileOwner::Pointer next_owner, old_owner;
@@ -2689,7 +2720,7 @@ Status SegmentImpl::flush_checkpoint(bool durable) {
     }
   }
 
-  if (memory_store_) {
+  if (memory_store_ && block.doc_count() != 0) {
     // update segment meta with memory components
     finishing_memory_block_ = true;
     s = finish_memory_components();
@@ -2707,17 +2738,13 @@ Status SegmentImpl::flush_checkpoint(bool durable) {
   // its manifest can make WAL cleanup safe. FileDumper/Arrow close is not
   // fsync.
   if (epoch) {
-    const auto path = FileHelper::MakeWalEpochPath(seg_path_, epoch + 1);
+    const auto path = FileHelper::MakeWalEpochPath(seg_path_, successor_epoch);
     old_owner = version_manager_->fts_retirement()->track(
         FileHelper::MakeWalEpochPath(seg_path_, epoch), false, false);
-    // Fail closed on a name collision. Recovery's committed keep set owns
-    // cleanup of a candidate epoch left over from a previous attempt.
-    if (FileHelper::FileExists(path)) {
-      return Status::FailedPrecondition("Successor WAL epoch already exists");
-    }
+    old_owner->register_bytes(wal_file_->size_bytes());
     next_owner = version_manager_->fts_retirement()->track(path, false, true);
     WalOptions options;
-    options.epoch = epoch + 1;
+    options.epoch = successor_epoch;
     options.create_new = true;
     if (WalFile::CreateAndOpen(path, options, &next_wal) != 0 ||
         next_wal->flush() != 0) {
@@ -5847,15 +5874,19 @@ Status SegmentImpl::migrate_fts_writer() {
     status = (*next)->import_legacy(
         *fts_indexer_, {seg_path_, id(), block, options_.enable_mmap_});
     CHECK_RETURN_STATUS(status);
-    auto root = (*next)->checkpoint(1);
+    auto epoch = NextWalEpoch(seg_path_, 0);
+    if (!epoch) {
+      return epoch.error();
+    }
+    const auto path = FileHelper::MakeWalEpochPath(seg_path_, *epoch);
+    auto root = (*next)->checkpoint(*epoch);
     if (!root) {
       return root.error();
     }
     block.fts_writing_ = std::move(*root);
-    const auto path = FileHelper::MakeWalEpochPath(seg_path_, 1);
     WalOptions options;
     options.create_new = true;
-    options.epoch = 1;
+    options.epoch = *epoch;
     WalFilePtr wal;
     if (WalFile::CreateAndOpen(path, options, &wal) != 0) {
       return Status::InternalError("Cannot reserve migration WAL epoch");

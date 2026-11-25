@@ -13,7 +13,9 @@
 // limitations under the License.
 
 #include <atomic>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <gtest/gtest.h>
 #include <zvec/core/framework/index_factory.h>
@@ -74,8 +76,8 @@ TEST_F(FtsGenerationTest, RunDiskChargeFollowsPinsAndFailedDeletion) {
                         : Status::InternalError("injected unlink failure");
   });
   auto file = queue->track(path_ + "/retained.run", false, true);
-  file->register_run(4096);
-  file->register_run(4096);
+  file->register_bytes(4096);
+  file->register_bytes(4096);
   EXPECT_EQ(4096u, queue->uncheckpointed_bytes());
   file->preserve();
   EXPECT_EQ(0u, queue->uncheckpointed_bytes());
@@ -158,7 +160,8 @@ TEST_F(FtsGenerationTest, WritingLayoutsPreserveLegacyScoresAndPhraseOrder) {
           ASSERT_EQ(expected->size(), actual->size());
           for (size_t i = 0; i < actual->size(); ++i) {
             EXPECT_EQ(expected->at(i).doc_id, actual->at(i).doc_id);
-            EXPECT_EQ(expected->at(i).score, actual->at(i).score);
+            EXPECT_EQ(0, std::memcmp(&expected->at(i).score,
+                                     &actual->at(i).score, sizeof(float)));
           }
         }
       }
@@ -215,6 +218,99 @@ TEST_F(FtsGenerationTest,
   EXPECT_TRUE(source_->flush().ok());
 }
 
+TEST_F(FtsGenerationTest, WideCheckpointSealsOneFieldAtATimeAfterReopen) {
+  CollectionSchema schema("wide");
+  std::vector<std::string> names;
+  for (uint32_t f = 0; f < 256; ++f) {
+    names.push_back("f" + std::to_string(f));
+    ASSERT_TRUE(schema
+                    .add_field(std::make_shared<FieldSchema>(
+                        names.back(), DataType::STRING, true,
+                        fields_[0]->index_params()))
+                    .ok());
+  }
+  auto retirement = fts::FtsRetirementQueue::Create();
+  auto budget = std::make_shared<fts::FtsReadBudget>(64u << 20);
+  fts::FtsWritingOptions options;
+  auto writer = fts::FtsWritingIndex::Open(path_, 3, 7, false, schema,
+                                           retirement, budget, options);
+  ASSERT_TRUE(writer) << writer.error().message();
+  for (size_t row = 0; row < 4; ++row) {
+    auto doc = (*writer)->prepare(fts::FtsWritingIndex::Fields(names.size()));
+    ASSERT_TRUE(doc) << doc.error().message();
+    (*writer)->apply(**doc);
+    ASSERT_TRUE((*writer)->flush().ok());
+  }
+  auto root = (*writer)->checkpoint(1);
+  ASSERT_TRUE(root);
+  ASSERT_EQ(4u, root->runs.size());
+  (*writer)->publish_checkpoint();
+  writer->reset();
+  options.temporary_bytes_per_job = 64u << 10;
+  writer = fts::FtsWritingIndex::Open(path_, 3, 7, false, schema, retirement,
+                                      budget, options, &*root);
+  ASSERT_TRUE(writer) << writer.error().message();
+  FtsIndexer::CustomTarget target{
+      path_, 3, {7, BlockType::FTS_INDEX, 0, 3, 4, names}, false};
+  auto sealed = (*writer)->seal(target);
+  ASSERT_TRUE(sealed) << sealed.error().message();
+  EXPECT_GT((*sealed)->spool_stats().peak_reserved_bytes,
+            options.temporary_bytes_per_job);
+  for (const auto &name : {names.front(), names.back()}) {
+    auto source = (*sealed)->open_source(name, 4);
+    ASSERT_TRUE(source);
+    EXPECT_EQ(0u, (*source)->statistics().present);
+    EXPECT_EQ(4u, (*source)->statistics().rows);
+  }
+}
+
+TEST_F(FtsGenerationTest, SingleRunSealRejectsCorruptedPositionBytes) {
+  auto retirement = fts::FtsRetirementQueue::Create();
+  auto budget = std::make_shared<fts::FtsReadBudget>(8u << 20);
+  CollectionSchema schema("single");
+  for (const auto &field : fields_) {
+    ASSERT_TRUE(schema.add_field(field).ok());
+  }
+  auto writer =
+      fts::FtsWritingIndex::Open(path_, 3, 7, true, schema, retirement, budget);
+  ASSERT_TRUE(writer);
+  auto doc = (*writer)->prepare({"one one", "two"});
+  ASSERT_TRUE(doc);
+  (*writer)->apply(**doc);
+  auto root = (*writer)->checkpoint(1);
+  ASSERT_TRUE(root && root->runs.size() == 1);
+  (*writer)->publish_checkpoint();
+  writer->reset();
+  const auto &run = root->runs.front();
+  const auto path =
+      FileHelper::MakeFtsRunPath(path_, 7, run.generation, run.id);
+  auto storage = core::IndexFactory::CreateStorage("MMapFileReadStorage");
+  ASSERT_TRUE(storage && storage->init({}) == 0 &&
+              storage->open(path, false) == 0);
+  auto positions = storage->get("field.0.positions");
+  ASSERT_TRUE(positions && positions->data_size() > 0);
+  const auto offset = positions->data_offset() + positions->data_size() - 1;
+  positions.reset();
+  ASSERT_EQ(0, storage->close());
+  {
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    char byte;
+    ASSERT_TRUE(file.seekg(offset).read(&byte, 1));
+    byte ^= 1;
+    ASSERT_TRUE(file.seekp(offset).write(&byte, 1));
+  }
+  auto damaged = fts::FtsContainerReader::Open(path, true);
+  ASSERT_TRUE(damaged);
+  ASSERT_FALSE((*damaged)->verify_all().ok());
+  writer = fts::FtsWritingIndex::Open(path_, 3, 7, true, schema, retirement,
+                                      budget, {}, &*root);
+  ASSERT_TRUE(writer) << writer.error().message();
+  auto sealed = (*writer)->seal(target(true, 1));
+  ASSERT_FALSE(sealed);
+  EXPECT_EQ(StatusCode::INTERNAL_ERROR, sealed.error().code());
+  EXPECT_TRUE(FileHelper::FileExists(path));
+}
+
 TEST_F(FtsGenerationTest, RunSealChecksTemporaryBudgetAndSourceOrder) {
   auto retirement = fts::FtsRetirementQueue::Create();
   auto read_budget = std::make_shared<fts::FtsReadBudget>(64u << 20);
@@ -251,7 +347,8 @@ TEST_F(FtsGenerationTest, RunSealChecksTemporaryBudgetAndSourceOrder) {
   EXPECT_EQ(wrong_writer.error().code(), StatusCode::INVALID_ARGUMENT);
   auto seal = [&](uint64_t budget) {
     auto source = [&](size_t run, const FieldSchema::Ptr &field) {
-      return runs[std::find(fields_.begin(), fields_.end(), field) - fields_.begin()][run];
+      return runs[std::find(fields_.begin(), fields_.end(), field) -
+                  fields_.begin()][run];
     };
     return FtsIndexer::PrepareMerged(target(false, 6), fields_, 2, source, {},
                                      fts::FtsMergePolicy::kCoalesceRuns,

@@ -29,6 +29,9 @@ class FtsRun {
  public:
   using Ptr = std::shared_ptr<FtsRun>;
 
+  using FieldSources = std::vector<FtsFieldSource::Ptr>;
+  using OpenField = std::function<Result<FieldSources>(uint32_t)>;
+
   static Result<Ptr> Write(
       const std::string &segment_path, bool mmap, uint64_t segment_id,
       uint32_t block_id, uint32_t parent_begin,
@@ -37,6 +40,15 @@ class FtsRun {
       const std::shared_ptr<FtsReadBudget> &read_budget,
       const format::Identity &writer_id = {},
       uint64_t temporary_bytes = UINT64_C(4) << 30);
+
+  static Result<Ptr> Write(const std::string &segment_path, bool mmap,
+                           uint64_t segment_id, uint32_t block_id,
+                           uint32_t parent_begin, size_t field_count,
+                           const OpenField &open_field,
+                           const FtsRetirementQueue::Pointer &retirement,
+                           const std::shared_ptr<FtsReadBudget> &read_budget,
+                           const format::Identity &writer_id = {},
+                           uint64_t temporary_bytes = UINT64_C(4) << 30);
 
   static Result<Ptr> Open(const std::string &segment_path, bool mmap,
                           uint64_t segment_id, uint32_t block_id,

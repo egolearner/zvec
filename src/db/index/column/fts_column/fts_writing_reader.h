@@ -23,6 +23,7 @@ constexpr size_t kMaxWritingRuns = 16;
 // The inputs cover consecutive, disjoint local domains starting at parent
 // row zero. A caller must hold the collection read barrier for mutable inputs.
 Result<FtsSegmentReader::Ptr> OpenWritingFtsReader(
-    std::vector<FtsSegmentReader::Ptr> inputs, std::vector<uint32_t> rows);
+    std::vector<FtsSegmentReader::Ptr> inputs, std::vector<uint32_t> rows,
+    std::shared_ptr<FtsReadBudget> budget = {});
 
 }  // namespace zvec::fts

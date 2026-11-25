@@ -53,6 +53,70 @@ TEST(ActiveBufferTest, ChunkedAnalyzerMatchesExistingTokenSequence) {
   }
 }
 
+TEST(ActiveBufferTest, LongUnicodeTextMatchesTermPositionsAndByteOffsets) {
+  std::string input;
+  for (size_t i = 0; i < 22000; ++i) {
+    input += "中";
+  }
+  FtsIndexParams params{"standard", {"lowercase"}, ""};
+  ExpectAnalysis(params, input, 128 * 1024);
+  input.clear();
+  for (size_t i = 0; i < 1000; ++i) {
+    input += "中\u0301あA.B12,456👨‍👩‍👧‍👦";
+  }
+  ExpectAnalysis(params, input, 128 * 1024);
+  input.clear();
+  for (size_t i = 0; i < 1500; ++i) {
+    input += "α,β。👨‍👩‍👧‍👦🇨🇳3️⃣";
+  }
+  ExpectAnalysis(params, input, 128 * 1024);
+}
+
+TEST(ActiveBufferTest, LongCjkDocumentCanBeAppliedInMemoryAndThroughSpill) {
+  const std::string path{"fts_cjk_spill.fixture"};
+  ASSERT_TRUE(FileHelper::CreateDirectory(path));
+  auto retirement = FtsRetirementQueue::Create();
+  auto cleanup = retirement->track(path, true, true);
+  CollectionSchema schema("cjk");
+  auto field = std::make_shared<FieldSchema>(
+      "body", DataType::STRING, true,
+      std::make_shared<zvec::FtsIndexParams>("standard"));
+  ASSERT_TRUE(schema.add_field(field).ok());
+  std::string input;
+  for (size_t i = 0; i < 22000; ++i) {
+    input += "中";
+  }
+  for (const bool spill : {false, true}) {
+    FtsWritingOptions options;
+    options.active_bytes = spill ? 16384 : 4u << 20;
+    options.prepare_bytes = 4u << 20;
+    auto budget = std::make_shared<FtsReadBudget>(8u << 20);
+    auto writer = FtsWritingIndex::Open(path, 1, 2, true, schema, retirement,
+                                        budget, options);
+    ASSERT_TRUE(writer);
+    auto doc = (*writer)->prepare({input});
+    ASSERT_TRUE(doc) << doc.error().message();
+    (*writer)->apply(**doc);
+    EXPECT_EQ(spill, (*writer)->run_file_bytes() != 0);
+    auto root = (*writer)->checkpoint(1);
+    ASSERT_TRUE(root && root->runs.size() == 1);
+    auto run =
+        FtsRun::Open(path, true, 1, 2, root->runs.front(), retirement, budget);
+    ASSERT_TRUE(run);
+    auto reader = (*run)->reader(0);
+    ASSERT_TRUE(reader);
+    auto term = (*reader)->lookup("中");
+    ASSERT_TRUE(term && *term);
+    auto postings = (*term)->postings();
+    ASSERT_TRUE(postings);
+    ASSERT_EQ(0u, *(*postings)->next());
+    EXPECT_EQ(22000u, (*postings)->payload()->tf);
+    auto positions = (*term)->positions(0);
+    ASSERT_TRUE(positions);
+    EXPECT_EQ(21999u, **(*positions)->seek_ge(21999));
+  }
+}
+
 TEST(ActiveBufferTest, JiebaNaturalUnitsAndMalformedTail) {
   std::string input = "我爱中华人民共和国，南京市长江大桥。Java SDK\tword ";
   input.append(1, '\0');
@@ -132,6 +196,36 @@ std::shared_ptr<FtsActiveBuffer> MakeBuffer(
   auto buffer = FtsActiveBuffer::Create(fields, active_bytes, 1024 * 1024,
                                         std::move(budget));
   return buffer ? *buffer : nullptr;
+}
+
+TEST(ActiveBufferTest, ConcurrentPostingBatchesShareTheReadLimit) {
+  auto budget = std::make_shared<FtsReadBudget>(3000);
+  auto params = std::make_shared<zvec::FtsIndexParams>("standard");
+  auto active = FtsActiveBuffer::Create(
+      {std::make_shared<FieldSchema>("body", DataType::STRING, true, params)},
+      65536, 1u << 20, {}, budget);
+  ASSERT_TRUE(active);
+  auto doc = (*active)->prepare({"one two"});
+  ASSERT_TRUE(doc);
+  (*active)->apply(**doc);
+  auto part = (*active)->reader(0);
+  ASSERT_TRUE(part);
+  auto reader = OpenWritingFtsReader({*part}, {1}, budget);
+  ASSERT_TRUE(reader);
+  auto first = (*reader)->lookup("one");
+  auto second = (*reader)->lookup("two");
+  ASSERT_TRUE(first && second);
+  {
+    auto a = (*first)->postings();
+    ASSERT_TRUE(a && (*a)->next_batch());
+    auto b = (*second)->postings();
+    ASSERT_TRUE(b);
+    auto denied = (*b)->next_batch();
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(StatusCode::RESOURCE_EXHAUSTED, denied.error().code());
+  }
+  auto retry = (*second)->postings();
+  ASSERT_TRUE(retry && (*retry)->next_batch());
 }
 
 TEST(ActiveBufferTest, CollectionAdmissionFollowsPrepareAndPinnedFrozenOwner) {

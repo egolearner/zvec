@@ -459,15 +459,32 @@ void FtsReadRange::swap(FtsReadRange &other) noexcept {
   swap(length_, other.length_);
 }
 
+bool FtsReadBudget::try_acquire(size_t bytes) {
+  size_t current = used_.load(std::memory_order_relaxed);
+  do {
+    if (bytes > limit_ - current) {
+      return false;
+    }
+  } while (!used_.compare_exchange_weak(current, current + bytes,
+                                        std::memory_order_relaxed));
+  return true;
+}
+
+Result<std::shared_ptr<void>> FtsReadBudget::reserve(size_t bytes) {
+  if (!try_acquire(bytes)) {
+    return tl::make_unexpected(Exhausted());
+  }
+  return std::shared_ptr<void>(
+      this, [owner = shared_from_this(), bytes](void *) {
+        owner->used_.fetch_sub(bytes, std::memory_order_relaxed);
+      });
+}
+
 Result<std::shared_ptr<FtsContainerReader::Lease>> FtsContainerReader::reserve(
     size_t bytes) {
-  size_t current = budget_->used_.load(std::memory_order_relaxed);
-  do {
-    if (bytes > budget_->limit_ - current) {
-      return tl::make_unexpected(Exhausted());
-    }
-  } while (!budget_->used_.compare_exchange_weak(current, current + bytes,
-                                                 std::memory_order_relaxed));
+  if (!budget_->try_acquire(bytes)) {
+    return tl::make_unexpected(Exhausted());
+  }
   return std::make_shared<Lease>(shared_from_this(), bytes);
 }
 
@@ -754,6 +771,28 @@ Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
   return range;
 }
 
+Result<FtsReadRange> FtsContainerReader::read_verified_chunk(
+    const format::SectionMetadata &section, uint64_t offset) {
+  if (scan_base_) {
+    return scan_base_->read_verified_chunk(section, offset);
+  }
+  if (offset >= section.length || offset % metadata_.layout_granule != 0) {
+    return tl::make_unexpected(Corrupt());
+  }
+  auto range = read(
+      section.name, offset,
+      std::min<uint64_t>(metadata_.layout_granule, section.length - offset));
+  if (!range) {
+    return range;
+  }
+  auto status =
+      verify_chunk(section, offset / metadata_.layout_granule, range->view());
+  if (!status.ok()) {
+    return tl::make_unexpected(status);
+  }
+  return range;
+}
+
 Status FtsContainerReader::verify_all() {
   if (scan_base_) {
     return scan_base_->verify_all();
@@ -761,18 +800,11 @@ Status FtsContainerReader::verify_all() {
   for (const auto &section : metadata_.sections) {
     uint64_t offset = 0;
     while (offset < section.length) {
-      const uint64_t length =
-          std::min<uint64_t>(metadata_.layout_granule, section.length - offset);
-      auto range = read(section.name, offset, length);
+      auto range = read_verified_chunk(section, offset);
       if (!range) {
         return range.error();
       }
-      auto status = verify_chunk(section, offset / metadata_.layout_granule,
-                                 range->view());
-      if (!status.ok()) {
-        return status;
-      }
-      offset += length;
+      offset += range->view().size();
     }
   }
   return Status::OK();

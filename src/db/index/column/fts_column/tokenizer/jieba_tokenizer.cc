@@ -199,7 +199,16 @@ static Status check_jieba_file(const std::string &path, bool allow_empty) {
   return Status::OK();
 }
 
+Status JiebaTokenizer::validate_config(const ailego::JsonObject &config) {
+  JiebaTokenizer tokenizer;
+  return tokenizer.configure(config, false);
+}
+
 Status JiebaTokenizer::init(const ailego::JsonObject &config) {
+  return configure(config, true);
+}
+
+Status JiebaTokenizer::configure(const ailego::JsonObject &config, bool load) {
   reset();
   longest_word_ = cppjieba::MAX_WORD_LENGTH;
 
@@ -249,6 +258,10 @@ Status JiebaTokenizer::init(const ailego::JsonObject &config) {
         return status;
       }
     }
+  }
+
+  if (!load) {
+    return Status::OK();
   }
 
   try {

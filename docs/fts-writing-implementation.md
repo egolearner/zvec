@@ -110,4 +110,5 @@ python3 benchmarks/fts/fts_writing_benchmark.py \
 - Mac 和 191 的 manifest 专项各通过 25 条测试，包括新加的 16 个进程退出窗口。每次在升级的四次文件替换之一中，于写入、文件同步、改名或目录同步之前退出。重启逐项核对生效的 writer 和版本，再完成一次新提交。[191 的 16 个窗口与专项回归](/Users/jiliang.ljl/tmp/fts-writing.nQZ5UNvi/linux-formal-a/version-crash-matrix.txt)
 - 191 另对真实 Collection 的 checkpoint 在九个代码位置终止进程，覆盖 forward block 收尾、下一 WAL epoch 已创建、flush/merge、run 已就绪、manifest 切换和旧文件退休。测试语料含 50 个主键和一个反复替换、删除、重建的探针，在写入中每 6 行 checkpoint。每次终止都从独立副本重开，核对 51 个主键的存在性与完整字段值，并将四条查询的全部有序 DocID、FP32 分数与正常 checkpoint 对照。九组均一致。[九组结果](/Users/jiliang.ljl/tmp/fts-writing.nQZ5UNvi/linux-formal-a/checkpoint-crashes/checked.json) · [复跑脚本](/Users/jiliang.ljl/tmp/fts-writing.nQZ5UNvi/linux-formal-a/checkpoint-crashes/checkpoint_crash_verify.py)
 - 磁盘准入分别跟踪未 checkpoint 的 run、WAL、仍被读者持有或暂时删除失败的文件，以及每个任务的输出与临时文件。达到未 checkpoint 阈值时触发全库 checkpoint，已在执行的有界任务可以完成。退休文件超限会在下一次写入 WAL 前返回资源错误。
+- 新 run 的编码仍受单任务临时磁盘限额约束。对已经接收的 run 做合并或封存时，另按输入文件、字段行数、词位数和词典块的最大展开量计算重写空间，并以目标文件系统的当前可用空间为上限。输出和临时文件共用计数；同一时刻只打开一个字段的输入。
 - 本轮覆盖 macOS arm64 和 Linux x86_64。Windows、iOS、Android 构建与故障恢复、所有 I/O 故障点的进程退出矩阵、写锁外可取消的慢 I/O 等待仍属启用门槛。Jieba 对外部模型按输入规模预检，要求加载期间词典文件稳定。尚无整个进程的硬堆上限或冷盘性能结论。

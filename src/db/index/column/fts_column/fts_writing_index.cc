@@ -2,12 +2,64 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "fts_writing_index.h"
 #include <algorithm>
+#include <filesystem>
+#include <zvec/ailego/utility/file_helper.h>
 #include "db/common/typedef.h"
 #include "db/index/common/manifest_codec.h"
 #include "fts_document_spill.h"
 #include "fts_writing_reader.h"
 
 namespace zvec::fts {
+
+namespace {
+
+// Fresh runs must fit their admission quota. Rewriting immutable runs also
+// needs space proportional to the data already accepted, including after
+// reopen. Cap that allowance by free space on the candidate's filesystem.
+Result<uint64_t> RewriteDiskBudget(const std::string &directory,
+                                   const std::vector<FtsRun::Ptr> &runs,
+                                   uint64_t job_bytes) {
+  if (runs.empty()) {
+    return job_bytes;
+  }
+  std::error_code error;
+  auto available =
+      std::filesystem::space(ailego::FileHelper::PathFromUtf8(directory), error)
+          .available;
+  if (error) {
+    return tl::make_unexpected(Status::InternalError(
+        "Cannot measure FTS rewrite space: ", error.message()));
+  }
+  uint64_t limit = std::min<uint64_t>(available, job_bytes);
+  auto allow = [&](uint64_t count, uint64_t bytes) {
+    const uint64_t remaining = available - limit;
+    limit += count > remaining / bytes ? remaining : count * bytes;
+  };
+  for (const auto &run : runs) {
+    const auto &meta = run->container()->metadata();
+    // Input streams, their output copies, and checksum/framing overhead.
+    allow(run->descriptor().file_size, 4);
+    for (const auto &field : meta.fields) {
+      // Raw document rows, posting staging, position indexes and encoded
+      // blocks. A one-token posting is the worst case for fixed framing.
+      allow(meta.row_count, 32);
+      allow(field.total_tokens, 512);
+    }
+    for (const auto &section : meta.sections) {
+      // A prefix-coded dictionary block can expand to at most one copy of
+      // its full first key per entry. Charge both spool and container copies.
+      constexpr std::string_view suffix = ".terms";
+      if (section.name.size() >= suffix.size() &&
+          section.name.compare(section.name.size() - suffix.size(),
+                               suffix.size(), suffix) == 0) {
+        allow(section.length, 2 * format::kDictionaryBlockTerms);
+      }
+    }
+  }
+  return limit;
+}
+
+}  // namespace
 
 Result<FtsWritingIndex::Ptr> FtsWritingIndex::Open(
     std::string directory, uint32_t segment, uint32_t block, bool mmap,
@@ -29,7 +81,8 @@ Result<FtsWritingIndex::Ptr> FtsWritingIndex::Open(
                                                       options.prepare_bytes);
   }
   auto active = FtsActiveBuffer::Create(fields, options.active_bytes,
-                                        options.prepare_bytes, options.memory);
+                                        options.prepare_bytes, options.memory,
+                                        read_budget);
   if (!active) {
     return tl::make_unexpected(active.error());
   }
@@ -187,44 +240,55 @@ void FtsWritingIndex::apply(PreparedFtsDocument &doc) {
   }
 }
 
-FtsWritingIndex::Job FtsWritingIndex::encode(uint32_t begin, Sources sources,
-                                             FtsWriteBudget::Part part) {
+Status FtsWritingIndex::encode(uint32_t begin, FtsRun::OpenField open_field,
+                               FtsWriteBudget::Part part, Job *job,
+                               uint64_t temporary_bytes) {
   auto workspace = options_.memory->reserve_job(part);
   if (!workspace) {
-    std::promise<Result<Run>> denied;
-    denied.set_value(tl::make_unexpected(workspace.error()));
-    return denied.get_future();
+    return workspace.error();
   }
-  return std::async(
-      std::launch::async,
-      [dir = directory_, mmap = mmap_, segment = segment_, block = block_,
-       begin, sources = std::move(sources), retirement = retirement_,
-       budget = read_budget_, writer = writer_id_,
-       temporary_bytes = options_.temporary_bytes_per_job,
-       workspace = std::move(*workspace)]() mutable {
-        // The future can outlive execution. Release the slot on worker exit.
-        auto lease = std::move(workspace);
-        return FtsRun::Write(dir, mmap, segment, block, begin, sources,
-                             retirement, budget, writer, temporary_bytes);
-      });
+  try {
+    *job = std::async(
+        std::launch::async,
+        [dir = directory_, mmap = mmap_, segment = segment_, block = block_,
+         begin, count = fields_.size(), open_field = std::move(open_field),
+         retirement = retirement_, budget = read_budget_, writer = writer_id_,
+         temporary_bytes, workspace = std::move(*workspace)]() mutable {
+          // The future can outlive execution. Release the slot on worker exit.
+          auto lease = std::move(workspace);
+          return FtsRun::Write(dir, mmap, segment, block, begin, count,
+                               open_field, retirement, budget, writer,
+                               temporary_bytes);
+        });
+  } catch (const std::system_error &error) {
+    return {StatusCode::RESOURCE_EXHAUSTED,
+            std::string("Cannot start FTS encoder: ") + error.what()};
+  }
+  return Status::OK();
+}
+
+Status FtsWritingIndex::start_flush() {
+  return encode(
+      active_begin_ - frozen_->rows(),
+      [input = frozen_](uint32_t field) -> Result<FtsRun::FieldSources> {
+        auto source = input->source(field);
+        if (!source) {
+          return tl::make_unexpected(source.error());
+        }
+        return FtsRun::FieldSources{std::move(*source)};
+      },
+      FtsWriteBudget::Part::Flush, &flush_job_,
+      options_.temporary_bytes_per_job);
 }
 
 Status FtsWritingIndex::publish_flush() {
   if (!frozen_) {
     return Status::OK();
   }
-  // On an I/O failure the complete frozen input remains visible and retryable.
+  // On an I/O or scheduling failure the frozen input remains retryable.
   if (!flush_job_.valid()) {
-    Sources inputs(fields_.size());
-    for (size_t i = 0; i < fields_.size(); ++i) {
-      auto source = frozen_->source(i);
-      if (!source) {
-        return source.error();
-      }
-      inputs[i].push_back(std::move(*source));
-    }
-    flush_job_ = encode(active_begin_ - frozen_->rows(), std::move(inputs),
-                        FtsWriteBudget::Part::Flush);
+    auto status = start_flush();
+    CHECK_RETURN_STATUS(status);
   }
   auto run = flush_job_.get();
   if (!run) {
@@ -260,39 +324,21 @@ Status FtsWritingIndex::freeze() {
     CHECK_RETURN_STATUS(status);
   }
   auto next = FtsActiveBuffer::Create(fields_, options_.active_bytes,
-                                      options_.prepare_bytes, options_.memory);
+                                      options_.prepare_bytes, options_.memory,
+                                      read_budget_);
   if (!next) {
     return next.error();
   }
-  Sources inputs(fields_.size());
-  for (size_t i = 0; i < fields_.size(); ++i) {
-    auto source = active_->source(i);
-    if (!source) {
-      return source.error();
-    }
-    inputs[i].push_back(std::move(*source));
+  // Complete the in-place sort and transfer its memory lease on the writer
+  // thread before readers or the worker can observe the frozen buffer.
+  auto first_field = active_->source(0);
+  if (!first_field) {
+    return first_field.error();
   }
   frozen_ = std::move(active_);
   active_ = std::move(*next);
-  const auto begin = active_begin_;
   active_begin_ += frozen_->rows();
-  flush_job_ = encode(begin, std::move(inputs), FtsWriteBudget::Part::Flush);
-  return Status::OK();
-}
-
-Result<FtsWritingIndex::Sources> FtsWritingIndex::sources(size_t first,
-                                                          size_t count) const {
-  Sources inputs(fields_.size());
-  for (size_t i = 0; i < fields_.size(); ++i) {
-    for (size_t j = first; j < first + count; ++j) {
-      auto source = runs_[j]->source(i);
-      if (!source) {
-        return tl::make_unexpected(source.error());
-      }
-      inputs[i].push_back(std::move(*source));
-    }
-  }
-  return inputs;
+  return start_flush();
 }
 
 Status FtsWritingIndex::schedule_merge() {
@@ -321,13 +367,29 @@ Status FtsWritingIndex::schedule_merge() {
       merge_first_ = i;
     }
   }
-  auto inputs = sources(merge_first_, merge_size_);
-  if (!inputs) {
-    return inputs.error();
+  auto first = runs_.begin() + merge_first_;
+  std::vector<Run> inputs(first, first + merge_size_);
+  const auto begin = inputs.front()->begin();
+  auto disk_budget =
+      RewriteDiskBudget(directory_, inputs, options_.temporary_bytes_per_job);
+  if (!disk_budget) {
+    return disk_budget.error();
   }
-  merge_job_ = encode(runs_[merge_first_]->begin(), std::move(*inputs),
-                      FtsWriteBudget::Part::Merge);
-  return Status::OK();
+  return encode(
+      begin,
+      [inputs =
+           std::move(inputs)](uint32_t field) -> Result<FtsRun::FieldSources> {
+        FtsRun::FieldSources sources;
+        for (const auto &run : inputs) {
+          auto source = run->source(field);
+          if (!source) {
+            return tl::make_unexpected(source.error());
+          }
+          sources.push_back(std::move(*source));
+        }
+        return sources;
+      },
+      FtsWriteBudget::Part::Merge, &merge_job_, *disk_budget);
 }
 
 Status FtsWritingIndex::publish_merge() {
@@ -395,7 +457,8 @@ Result<FtsColumnIndexerPtr> FtsWritingIndex::reader(
     auto status = add(active_);
     CHECK_RETURN_STATUS_EXPECTED(status);
   }
-  auto combined = OpenWritingFtsReader(std::move(readers), std::move(domains));
+  auto combined = OpenWritingFtsReader(std::move(readers), std::move(domains),
+                                       read_budget_);
   if (!combined) {
     return tl::make_unexpected(combined.error());
   }
@@ -445,18 +508,17 @@ Status FtsWritingIndex::import_legacy(const FtsIndexer &legacy,
   if (!snapshot) {
     return snapshot.error();
   }
-  Sources inputs(fields_.size());
-  for (size_t i = 0; i < fields_.size(); ++i) {
-    auto source =
-        (*snapshot)->open_source(fields_[i]->name(), target.block.doc_count());
-    if (!source) {
-      return source.error();
-    }
-    inputs[i].push_back(std::move(*source));
-  }
-  auto imported =
-      FtsRun::Write(directory_, mmap_, segment_, block_, 0, inputs, retirement_,
-                    read_budget_, writer_id_, options_.temporary_bytes_per_job);
+  auto imported = FtsRun::Write(
+      directory_, mmap_, segment_, block_, 0, fields_.size(),
+      [&](uint32_t field) -> Result<FtsRun::FieldSources> {
+        auto source = (*snapshot)->open_source(fields_[field]->name(),
+                                               target.block.doc_count());
+        if (!source) {
+          return tl::make_unexpected(source.error());
+        }
+        return FtsRun::FieldSources{std::move(*source)};
+      },
+      retirement_, read_budget_, writer_id_, options_.temporary_bytes_per_job);
   if (!imported) {
     return imported.error();
   }
@@ -495,23 +557,38 @@ Result<FtsIndexer::Ptr> FtsWritingIndex::seal(
     return tl::make_unexpected(
         Status::InvalidArgument("FTS seal row count mismatch"));
   }
+  auto disk_budget =
+      RewriteDiskBudget(directory_, runs_, options_.temporary_bytes_per_job);
+  if (!disk_budget) {
+    return tl::make_unexpected(disk_budget.error());
+  }
   if (runs_.size() == 1) {
     return FtsIndexer::PrepareRunSeal(target, fields_, *runs_.front(),
                                       writer_id_, retirement_, hook,
-                                      options_.temporary_bytes_per_job);
+                                      *disk_budget);
   }
   auto workspace = options_.memory->reserve_job(FtsWriteBudget::Part::Merge);
   if (!workspace) {
     return tl::make_unexpected(workspace.error());
   }
+  std::shared_ptr<FtsActiveBuffer> empty;
+  if (runs_.empty()) {
+    auto buffer = FtsActiveBuffer::Create(fields_, options_.active_bytes,
+                                          options_.prepare_bytes,
+                                          options_.memory, read_budget_);
+    if (!buffer) {
+      return tl::make_unexpected(buffer.error());
+    }
+    empty = std::move(*buffer);
+  }
   auto open_source = [&](size_t run, const FieldSchema::Ptr &field) {
-    const auto ordinal = std::find(fields_.begin(), fields_.end(), field) - fields_.begin();
-    return runs_.empty() ? active_->source(ordinal) : runs_[run]->source(ordinal);
+    const auto ordinal =
+        std::find(fields_.begin(), fields_.end(), field) - fields_.begin();
+    return empty ? empty->source(ordinal) : runs_[run]->source(ordinal);
   };
-  return FtsIndexer::PrepareMerged(target, fields_, std::max<size_t>(1, runs_.size()),
-                                   open_source, {},
-                                   FtsMergePolicy::kCoalesceRuns, retirement_,
-                                   hook, options_.temporary_bytes_per_job);
+  return FtsIndexer::PrepareMerged(
+      target, fields_, std::max<size_t>(1, runs_.size()), open_source, {},
+      FtsMergePolicy::kCoalesceRuns, retirement_, hook, *disk_budget);
 }
 
 }  // namespace zvec::fts

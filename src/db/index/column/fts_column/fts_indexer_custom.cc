@@ -335,7 +335,8 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareMerged(
                                             target.block.id(), rows, ordinal) ||
                 (!sources.empty() &&
                  (sources.front()->metadata().id != metadata.id ||
-                  sources.front()->metadata().incarnation != metadata.incarnation))) {
+                  sources.front()->metadata().incarnation !=
+                      metadata.incarnation))) {
               return tl::make_unexpected(
                   Status::InvalidArgument("Incompatible FTS seal run"));
             }
@@ -407,15 +408,13 @@ Result<FtsIndexer::Ptr> FtsIndexer::PrepareRunSeal(
           auto copied = out->begin_section(section.name);
           CHECK_RETURN_STATUS_EXPECTED(copied);
           for (uint64_t offset = 0; offset < section.length;) {
-            const auto size =
-                std::min<uint64_t>(65536, section.length - offset);
-            auto bytes = container->read(section.name, offset, size);
+            auto bytes = container->read_verified_chunk(section, offset);
             if (!bytes) {
               return tl::make_unexpected(bytes.error());
             }
             copied = out->append(bytes->view());
             CHECK_RETURN_STATUS_EXPECTED(copied);
-            offset += size;
+            offset += bytes->view().size();
           }
           copied = out->end_section();
           CHECK_RETURN_STATUS_EXPECTED(copied);

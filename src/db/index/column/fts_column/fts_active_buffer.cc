@@ -143,6 +143,7 @@ struct Data {
     return nullptr;
   }
   std::shared_ptr<FtsWriteBudget> budget;
+  std::shared_ptr<FtsReadBudget> read_budget;
   FtsWriteBudget::Lease metadata_lease, arena_lease;
   Arena arena;
   size_t active_limit, prepare_limit, buckets{0};
@@ -228,6 +229,11 @@ class PostingCursor final : public FtsReadPosting {
       return FtsPostingBatch{};
     }
     if (!batch_) {
+      auto lease = data_->read_budget->reserve(sizeof(Batch));
+      if (!lease) {
+        return tl::make_unexpected(lease.error());
+      }
+      batch_lease_ = std::move(*lease);
       batch_ = std::make_unique<Batch>();
     }
     const auto &field = data_->fields[field_];
@@ -259,6 +265,7 @@ class PostingCursor final : public FtsReadPosting {
   struct Batch {
     std::array<uint32_t, FtsPostingBatch::kCapacity> docs, tfs, lengths;
   };
+  std::shared_ptr<void> batch_lease_;
   std::unique_ptr<Batch> batch_;
   std::shared_ptr<Data> data_;
   uint32_t field_;
@@ -589,7 +596,8 @@ FtsActiveBuffer::~FtsActiveBuffer() = default;
 
 Result<std::shared_ptr<FtsActiveBuffer>> FtsActiveBuffer::Create(
     const FieldSchemaPtrList &fields, size_t active_bytes, size_t prepare_bytes,
-    std::shared_ptr<FtsWriteBudget> budget) {
+    std::shared_ptr<FtsWriteBudget> budget,
+    std::shared_ptr<FtsReadBudget> read_budget) {
   if (fields.empty() || fields.size() > format::kMaxFields ||
       prepare_bytes / 2 < fields.size() * sizeof(PendingField) + 1024) {
     return tl::make_unexpected(
@@ -618,6 +626,8 @@ Result<std::shared_ptr<FtsActiveBuffer>> FtsActiveBuffer::Create(
   }
   auto data = std::make_shared<Data>(active_bytes - overhead, prepare_bytes,
                                      budget, std::move(*config));
+  data->read_budget = read_budget ? std::move(read_budget)
+                                  : std::make_shared<FtsReadBudget>(64u << 20);
   const auto target_buckets = static_cast<uint32_t>(std::max<size_t>(
       8, std::min<size_t>(1 << 20, (active_bytes - overhead) / 256)));
   data->buckets = size_t{1} << (31 - ailego_clz32(target_buckets));
@@ -692,7 +702,7 @@ Result<std::unique_ptr<PreparedFtsDocument>> FtsActiveBuffer::prepare(
     }
     if (fields[i]) {
       pending.document.present = true;
-      auto status = data.fields[i].pipeline->analyze_to(
+      status = data.fields[i].pipeline->analyze_to(
           *fields[i],
           [&](std::string_view key, uint32_t, uint32_t pos) {
             return doc->add(i, key, pos);

@@ -31,7 +31,7 @@ FtsFileOwner::~FtsFileOwner() {
   }
 }
 
-void FtsFileOwner::register_run(uint64_t bytes) {
+void FtsFileOwner::register_bytes(uint64_t bytes) {
   std::lock_guard lock(queue_->mutex_);
   auto &entry = entry_.front();
   if (entry.bytes == 0) {

@@ -78,12 +78,14 @@ class FtsContainerReader;
 
 // Shared by every generation of one writing index, including retired files
 // that are still pinned. Acquisition never waits while holding a query lock.
-class FtsReadBudget {
+class FtsReadBudget : public std::enable_shared_from_this<FtsReadBudget> {
  public:
   explicit FtsReadBudget(size_t bytes) : limit_(bytes) {}
+  Result<std::shared_ptr<void>> reserve(size_t bytes);
 
  private:
   friend class FtsContainerReader;
+  bool try_acquire(size_t bytes);
   const size_t limit_;
   std::atomic<size_t> used_{0};
 };
@@ -144,6 +146,9 @@ class FtsContainerReader
   }
   Result<FtsReadRange> read(const std::string &section, uint64_t offset,
                             uint64_t length);
+  // Read and authenticate one complete source chunk before copying it.
+  Result<FtsReadRange> read_verified_chunk(
+      const format::SectionMetadata &section, uint64_t offset);
   // Explicit diagnostic only. Normal open/read/publication do not scan data
   // checksums, matching the vector storage's default validation policy.
   Status verify_all();

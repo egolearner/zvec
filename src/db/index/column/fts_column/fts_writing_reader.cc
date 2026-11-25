@@ -30,8 +30,8 @@ using Parts = std::vector<TermPart>;
 
 class JoinedPosting final : public FtsReadPosting {
  public:
-  explicit JoinedPosting(std::shared_ptr<const Parts> parts)
-      : parts_(std::move(parts)) {}
+  JoinedPosting(std::shared_ptr<const Parts> parts, std::shared_ptr<void> lease)
+      : parts_(std::move(parts)), lease_(std::move(lease)) {}
 
   Result<uint32_t> next() override {
     if (!status_.ok()) {
@@ -157,6 +157,7 @@ class JoinedPosting final : public FtsReadPosting {
   }
 
   std::shared_ptr<const Parts> parts_;
+  std::shared_ptr<void> lease_;
   size_t part_{0};
   FtsReadPosting::Ptr cursor_;
   std::array<uint32_t, FtsPostingBatch::kCapacity> docs_;
@@ -167,8 +168,10 @@ class JoinedPosting final : public FtsReadPosting {
 
 class JoinedTerm final : public FtsReadTerm {
  public:
-  JoinedTerm(Parts parts, uint64_t df)
-      : parts_(std::make_shared<const Parts>(std::move(parts))), df_(df) {}
+  JoinedTerm(Parts parts, uint64_t df, std::shared_ptr<FtsReadBudget> budget)
+      : parts_(std::make_shared<const Parts>(std::move(parts))),
+        df_(df),
+        budget_(std::move(budget)) {}
   uint64_t df() const override {
     return df_;
   }
@@ -176,7 +179,11 @@ class JoinedTerm final : public FtsReadTerm {
     return kUnbounded;
   }
   Result<FtsReadPosting::Ptr> postings() const override {
-    return std::make_unique<JoinedPosting>(parts_);
+    auto lease = budget_->reserve(sizeof(JoinedPosting));
+    if (!lease) {
+      return tl::make_unexpected(lease.error());
+    }
+    return std::make_unique<JoinedPosting>(parts_, std::move(*lease));
   }
   Result<FtsReadPosition::Ptr> positions(uint32_t row) const override {
     auto part = std::lower_bound(
@@ -192,15 +199,17 @@ class JoinedTerm final : public FtsReadTerm {
  private:
   std::shared_ptr<const Parts> parts_;
   uint64_t df_;
+  std::shared_ptr<FtsReadBudget> budget_;
 };
 
 class JoinedReader final : public FtsSegmentReader {
  public:
   JoinedReader(std::vector<Ptr> inputs, std::vector<uint32_t> rows,
-               BM25ScorerPtr scorer)
+               BM25ScorerPtr scorer, std::shared_ptr<FtsReadBudget> budget)
       : inputs_(std::move(inputs)),
         rows_(std::move(rows)),
-        scorer_(std::move(scorer)) {}
+        scorer_(std::move(scorer)),
+        budget_(std::move(budget)) {}
   BM25ScorerPtr scorer() const override {
     return scorer_;
   }
@@ -233,19 +242,21 @@ class JoinedReader final : public FtsSegmentReader {
     if (parts.empty()) {
       return FtsReadTerm::Ptr{};
     }
-    return std::make_shared<JoinedTerm>(std::move(parts), df);
+    return std::make_shared<JoinedTerm>(std::move(parts), df, budget_);
   }
 
  private:
   std::vector<Ptr> inputs_;
   std::vector<uint32_t> rows_;
   BM25ScorerPtr scorer_;
+  std::shared_ptr<FtsReadBudget> budget_;
 };
 
 }  // namespace
 
 Result<FtsSegmentReader::Ptr> OpenWritingFtsReader(
-    std::vector<FtsSegmentReader::Ptr> inputs, std::vector<uint32_t> rows) {
+    std::vector<FtsSegmentReader::Ptr> inputs, std::vector<uint32_t> rows,
+    std::shared_ptr<FtsReadBudget> budget) {
   // One active and one frozen buffer may join the bounded disk root.
   if (inputs.size() != rows.size() || inputs.size() > kMaxWritingRuns + 2) {
     return tl::make_unexpected(Status::InvalidArgument("Invalid writing root"));
@@ -275,8 +286,9 @@ Result<FtsSegmentReader::Ptr> OpenWritingFtsReader(
   }
   auto scorer = std::make_shared<BM25Scorer>(params);
   scorer->update_stats(documents, tokens);
-  return std::make_shared<JoinedReader>(std::move(inputs), std::move(rows),
-                                        std::move(scorer));
+  return std::make_shared<JoinedReader>(
+      std::move(inputs), std::move(rows), std::move(scorer),
+      budget ? std::move(budget) : std::make_shared<FtsReadBudget>(64u << 20));
 }
 
 }  // namespace zvec::fts

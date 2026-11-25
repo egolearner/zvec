@@ -72,6 +72,35 @@ Result<TokenizerPipelinePtr> TokenizerFactory::create(
     return tl::make_unexpected(std::move(status));
   }
 
+  auto filters = create_filters(params, *config);
+  if (!filters) {
+    return tl::make_unexpected(filters.error());
+  }
+  return std::make_shared<TokenizerPipeline>(std::move(tokenizer),
+                                             std::move(*filters));
+}
+
+Status TokenizerFactory::validate(const FtsIndexParams &params) {
+  if (params.tokenizer_name != "jieba") {
+    auto pipeline = create(params);
+    return pipeline ? Status::OK() : pipeline.error();
+  }
+  // Validate paths and filters without populating cppjieba's process cache.
+  // A writing pipeline reserves its model bytes before the first load.
+  auto config = parse_config(params);
+  if (!config) {
+    return config.error();
+  }
+  auto status = JiebaTokenizer::validate_config(*config);
+  if (!status.ok()) {
+    return status;
+  }
+  auto filters = create_filters(params, *config);
+  return filters ? Status::OK() : filters.error();
+}
+
+Result<std::vector<TokenFilterPtr>> TokenizerFactory::create_filters(
+    const FtsIndexParams &params, const ailego::JsonObject &config) {
   std::vector<TokenFilterPtr> filters;
   for (const auto &filter_name : params.filters) {
     TokenFilterPtr filter = create_filter(filter_name);
@@ -79,15 +108,14 @@ Result<TokenizerPipelinePtr> TokenizerFactory::create(
       return tl::make_unexpected(Status::InvalidArgument(
           "TokenizerFactory: unknown filter name: ", filter_name));
     }
-    if (!filter->init(*config)) {
+    if (!filter->init(config)) {
       return tl::make_unexpected(Status::InvalidArgument(
           "TokenizerFactory: failed to init filter: ", filter_name));
     }
     filters.push_back(std::move(filter));
   }
 
-  return std::make_shared<TokenizerPipeline>(std::move(tokenizer),
-                                             std::move(filters));
+  return filters;
 }
 
 std::vector<Token> TokenizerPipeline::process(const std::string &text) const {

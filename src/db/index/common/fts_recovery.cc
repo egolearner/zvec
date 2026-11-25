@@ -102,6 +102,7 @@ bool OwnedFtsEntry(std::string_view name, bool directory) {
 struct Orphan {
   std::string path;
   bool directory;
+  uint64_t bytes;
 };
 
 Status Collect(const std::string &directory, const std::set<std::string> &keep,
@@ -122,7 +123,11 @@ Status Collect(const std::string &directory, const std::set<std::string> &keep,
         (is_directory || std::filesystem::is_regular_file(status)) &&
         (root ? (!is_directory && OwnedRootFile(name))
               : OwnedFtsEntry(name, is_directory))) {
-      orphans->push_back({it->path().u8string(), is_directory});
+      const auto bytes = is_directory ? 0 : it->file_size(error);
+      if (error) {
+        break;
+      }
+      orphans->push_back({it->path().u8string(), is_directory, bytes});
     }
     it.increment(error);
   }
@@ -188,6 +193,7 @@ Status VersionManager::reclaim_unreferenced_files() {
   }
   for (const auto &orphan : orphans) {
     auto owner = fts_retirement_->track(orphan.path, orphan.directory, true);
+    owner->register_bytes(orphan.bytes);
     owner->retire();
   }
   // Failure to remove is deferred by the queue and cannot roll back recovery.

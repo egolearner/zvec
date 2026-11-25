@@ -41,7 +41,8 @@ class FtsActiveBuffer : public std::enable_shared_from_this<FtsActiveBuffer> {
  public:
   static Result<std::shared_ptr<FtsActiveBuffer>> Create(
       const FieldSchemaPtrList &fields, size_t active_bytes,
-      size_t prepare_bytes, std::shared_ptr<FtsWriteBudget> budget = {});
+      size_t prepare_bytes, std::shared_ptr<FtsWriteBudget> budget = {},
+      std::shared_ptr<FtsReadBudget> read_budget = {});
   ~FtsActiveBuffer();
   Result<std::unique_ptr<PreparedFtsDocument>> prepare(
       const std::vector<std::optional<std::string_view>> &fields);

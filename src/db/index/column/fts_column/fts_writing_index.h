@@ -80,15 +80,15 @@ class FtsWritingIndex {
 
  private:
   using Run = std::shared_ptr<FtsRun>;
-  using Sources = std::vector<std::vector<FtsFieldSource::Ptr>>;
   using Job = std::future<Result<Run>>;
   FtsWritingIndex() = default;
   Status freeze();
   Status publish_flush();
   Status schedule_merge();
   Status publish_merge();
-  Result<Sources> sources(size_t first, size_t count) const;
-  Job encode(uint32_t begin, Sources sources, FtsWriteBudget::Part part);
+  Status encode(uint32_t begin, FtsRun::OpenField open_field,
+                FtsWriteBudget::Part part, Job *job, uint64_t temporary_bytes);
+  Status start_flush();
 
   std::string directory_;
   uint32_t segment_{0}, block_{0}, active_begin_{0};
