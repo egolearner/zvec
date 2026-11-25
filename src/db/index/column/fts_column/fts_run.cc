@@ -64,19 +64,7 @@ class RunSource final : public FtsFieldSource {
     return source_->document(row);
   }
   Result<FtsSourceTerms::Ptr> terms() const override {
-    auto view = container_->scan_view();
-    if (view == container_) {
-      return source_->terms();
-    }
-    auto field = FtsFieldReader::Open(std::move(view), ordinal_);
-    if (!field) {
-      return tl::make_unexpected(field.error());
-    }
-    auto scan = OpenCustomFtsFieldSource(std::move(*field));
-    if (!scan) {
-      return tl::make_unexpected(scan.error());
-    }
-    return (*scan)->terms();
+    return source_->terms();
   }
   bool matches(uint64_t segment, uint32_t block, uint64_t begin,
                uint32_t ordinal) const {
@@ -353,7 +341,11 @@ Result<FtsFieldSource::Ptr> FtsRun::source(uint32_t field) const {
   if (field >= fields_.size()) {
     return tl::make_unexpected(Status::InvalidArgument("Missing run field"));
   }
-  auto source = OpenCustomFtsFieldSource(fields_[field]);
+  auto scan = FtsFieldReader::Open(container_->scan_view(), field);
+  if (!scan) {
+    return tl::make_unexpected(scan.error());
+  }
+  auto source = OpenCustomFtsFieldSource(std::move(*scan));
   if (!source) {
     return tl::make_unexpected(source.error());
   }

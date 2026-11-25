@@ -56,6 +56,8 @@ class FtsGenerationTest : public testing::Test {
     FileHelper::RemoveDirectory(path_);
   }
 
+  void check_corrupt_run(bool mmap, unsigned count, const char *section);
+
   const std::string path_{"fts_generation.fixture"};
   FieldSchemaPtrList fields_;
   FtsIndexer::Ptr source_;
@@ -264,21 +266,25 @@ TEST_F(FtsGenerationTest, WideCheckpointSealsOneFieldAtATimeAfterReopen) {
   }
 }
 
-TEST_F(FtsGenerationTest, SingleRunSealRejectsCorruptedPositionBytes) {
+void FtsGenerationTest::check_corrupt_run(bool mmap, unsigned count,
+                                          const char *section) {
   auto retirement = fts::FtsRetirementQueue::Create();
   auto budget = std::make_shared<fts::FtsReadBudget>(8u << 20);
-  CollectionSchema schema("single");
+  CollectionSchema schema("corrupt");
   for (const auto &field : fields_) {
     ASSERT_TRUE(schema.add_field(field).ok());
   }
   auto writer =
-      fts::FtsWritingIndex::Open(path_, 3, 7, true, schema, retirement, budget);
+      fts::FtsWritingIndex::Open(path_, 3, 7, mmap, schema, retirement, budget);
   ASSERT_TRUE(writer);
-  auto doc = (*writer)->prepare({"one one", "two"});
-  ASSERT_TRUE(doc);
-  (*writer)->apply(**doc);
+  for (unsigned i = 0; i < count; ++i) {
+    auto doc = (*writer)->prepare({"one one", "two"});
+    ASSERT_TRUE(doc);
+    (*writer)->apply(**doc);
+    ASSERT_TRUE((*writer)->flush().ok());
+  }
   auto root = (*writer)->checkpoint(1);
-  ASSERT_TRUE(root && root->runs.size() == 1);
+  ASSERT_TRUE(root && root->runs.size() == count);
   (*writer)->publish_checkpoint();
   writer->reset();
   const auto &run = root->runs.front();
@@ -287,10 +293,10 @@ TEST_F(FtsGenerationTest, SingleRunSealRejectsCorruptedPositionBytes) {
   auto storage = core::IndexFactory::CreateStorage("MMapFileReadStorage");
   ASSERT_TRUE(storage && storage->init({}) == 0 &&
               storage->open(path, false) == 0);
-  auto positions = storage->get("field.0.positions");
-  ASSERT_TRUE(positions && positions->data_size() > 0);
-  const auto offset = positions->data_offset() + positions->data_size() - 1;
-  positions.reset();
+  auto data = storage->get(section);
+  ASSERT_TRUE(data && data->data_size() > 0);
+  const auto offset = data->data_offset() + data->data_size() - 1;
+  data.reset();
   ASSERT_EQ(0, storage->close());
   {
     std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
@@ -302,13 +308,40 @@ TEST_F(FtsGenerationTest, SingleRunSealRejectsCorruptedPositionBytes) {
   auto damaged = fts::FtsContainerReader::Open(path, true);
   ASSERT_TRUE(damaged);
   ASSERT_FALSE((*damaged)->verify_all().ok());
-  writer = fts::FtsWritingIndex::Open(path_, 3, 7, true, schema, retirement,
-                                      budget, {}, &*root);
+  fts::FtsWritingOptions limits;
+  limits.soft_runs = limits.hard_runs = 2;
+  writer = fts::FtsWritingIndex::Open(path_, 3, 7, mmap, schema, retirement,
+                                      budget, limits, &*root);
   ASSERT_TRUE(writer) << writer.error().message();
-  auto sealed = (*writer)->seal(target(true, 1));
-  ASSERT_FALSE(sealed);
-  EXPECT_EQ(StatusCode::INTERNAL_ERROR, sealed.error().code());
+  auto sealed = (*writer)->seal(target(mmap, count));
+  EXPECT_FALSE(sealed);
+  if (!sealed) {
+    EXPECT_EQ(StatusCode::INTERNAL_ERROR, sealed.error().code());
+  }
+  if (count == 2) {
+    // At the hard limit the next flush must compact the two existing runs.
+    auto third = (*writer)->prepare({"three", "two"});
+    ASSERT_TRUE(third);
+    (*writer)->apply(**third);
+    auto merged = (*writer)->flush();
+    EXPECT_EQ(StatusCode::INTERNAL_ERROR, merged.code()) << merged.message();
+  }
   EXPECT_TRUE(FileHelper::FileExists(path));
+}
+
+TEST_F(FtsGenerationTest, SingleRunSealRejectsCorruptedPositionBytes) {
+  check_corrupt_run(true, 1, "field.0.positions");
+}
+
+TEST_F(FtsGenerationTest, MultiRunSealAndCompactionRejectCorruptedPositions) {
+  for (bool mmap : {false, true}) {
+    SCOPED_TRACE(mmap);
+    check_corrupt_run(mmap, 2, "field.0.positions");
+  }
+}
+
+TEST_F(FtsGenerationTest, RunRewritesRejectCorruptedDocumentLengths) {
+  check_corrupt_run(true, 2, "field.0.doclen");
 }
 
 TEST_F(FtsGenerationTest, RunSealChecksTemporaryBudgetAndSourceOrder) {

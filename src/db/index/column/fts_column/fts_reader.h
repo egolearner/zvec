@@ -46,6 +46,13 @@ class FtsReadPosting {
   virtual Result<uint32_t> next() = 0;
   virtual Result<uint32_t> advance(uint32_t target) = 0;
   virtual Result<FtsReadPayload> payload() = 0;
+  struct MergePayload {
+    uint32_t tf;
+    // A separately stored posting length can be checked against the output
+    // row table. Custom postings refer to the same lengths already copied.
+    std::optional<uint32_t> expected_length;
+  };
+  virtual Result<MergePayload> merge_payload();
   // Merge has already located doc on this cursor. Storage adapters can reuse
   // its decoded block to open positions without seeking the term again.
   virtual Result<FtsReadPosition::Ptr> current_positions(

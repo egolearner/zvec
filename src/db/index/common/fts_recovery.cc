@@ -105,6 +105,33 @@ struct Orphan {
   uint64_t bytes;
 };
 
+// Only regular files beneath an owned directory contribute to its charge.
+// Recovery never follows links outside the retired tree.
+uint64_t DirectoryBytes(const std::filesystem::path &directory,
+                        std::error_code &error) {
+  uint64_t total = 0;
+  for (std::filesystem::recursive_directory_iterator it(directory, error), end;
+       !error && it != end; it.increment(error)) {
+    const auto type = it->symlink_status(error);
+    if (error) {
+      break;
+    }
+    if (!std::filesystem::is_regular_file(type)) {
+      continue;
+    }
+    const auto bytes = it->file_size(error);
+    if (error) {
+      break;
+    }
+    if (bytes > UINT64_MAX - total) {
+      error = std::make_error_code(std::errc::value_too_large);
+      break;
+    }
+    total += bytes;
+  }
+  return total;
+}
+
 Status Collect(const std::string &directory, const std::set<std::string> &keep,
                bool root, std::vector<Orphan> *orphans) {
   std::error_code error;
@@ -123,7 +150,8 @@ Status Collect(const std::string &directory, const std::set<std::string> &keep,
         (is_directory || std::filesystem::is_regular_file(status)) &&
         (root ? (!is_directory && OwnedRootFile(name))
               : OwnedFtsEntry(name, is_directory))) {
-      const auto bytes = is_directory ? 0 : it->file_size(error);
+      const auto bytes = is_directory ? DirectoryBytes(it->path(), error)
+                                      : it->file_size(error);
       if (error) {
         break;
       }

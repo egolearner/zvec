@@ -429,7 +429,7 @@ TEST_F(FtsContainerTest, MergeScanReusesRangeAndKeepsOldSlicesAlive) {
   }
 }
 
-TEST_F(FtsContainerTest, PayloadChecksumIsOnlyCheckedExplicitly) {
+TEST_F(FtsContainerTest, QueryReadsSkipChecksumsButRunScansVerifyWholeChunks) {
   corrupt_section("field.0.postings");
   for (bool mmap : {false, true}) {
     auto reader = FtsContainerReader::Open(path_, mmap);
@@ -437,6 +437,16 @@ TEST_F(FtsContainerTest, PayloadChecksumIsOnlyCheckedExplicitly) {
     EXPECT_TRUE((*reader)->read("field.0.postings", 0, 1));
     EXPECT_EQ(0u, (*reader)->read_stats().hashed_bytes);
     EXPECT_FALSE((*reader)->verify_all().ok());
+    for (size_t budget : {1u << 20, 128u << 20}) {
+      auto file = FtsContainerReader::Open(path_, mmap, budget);
+      ASSERT_TRUE(file);
+      auto scan = (*file)->scan_view();
+      // The requested slice omits the flipped byte but overlaps its chunk.
+      EXPECT_FALSE(scan->read("field.0.postings", 1021, 6));
+      auto intact = scan->read("field.0.postings", 2047, 6);
+      ASSERT_TRUE(intact);
+      EXPECT_EQ(std::string_view(payload_).substr(2047, 6), intact->view());
+    }
   }
 }
 

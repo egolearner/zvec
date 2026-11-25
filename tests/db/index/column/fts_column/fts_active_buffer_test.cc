@@ -53,6 +53,22 @@ TEST(ActiveBufferTest, ChunkedAnalyzerMatchesExistingTokenSequence) {
   }
 }
 
+TEST(ActiveBufferTest, StreamingSkipsLongNonTokenPrefixes) {
+  std::string accents;
+  for (size_t i = 0; i < 24000; ++i) {
+    accents += "\u0301";
+  }
+  FtsIndexParams params{"standard", {}, ""};
+  ExpectAnalysis(params, accents + " " + accents + " finé", 16u << 20);
+  ExpectAnalysis(params, accents + accents + "finé", 16u << 20);
+  // A joiner can start an emoji, but its span cannot cross a space.
+  std::string joiners;
+  for (size_t i = 0; i < 16000; ++i) {
+    joiners += "\u200d";
+  }
+  ExpectAnalysis(params, joiners + " " + joiners + " finé", 16u << 20);
+}
+
 TEST(ActiveBufferTest, LongUnicodeTextMatchesTermPositionsAndByteOffsets) {
   std::string input;
   for (size_t i = 0; i < 22000; ++i) {
@@ -388,6 +404,11 @@ TEST(ActiveBufferTest, PostingBatchesCrossWritingPartsAndRetainCursorPosition) {
   ASSERT_EQ(batch->count, 1u);
   EXPECT_EQ(batch->docs[0], 142u);
   EXPECT_EQ((*cursor)->payload()->tf, 2u);
+  auto positions = (*cursor)->current_positions(**term, 142, true);
+  ASSERT_TRUE(positions);
+  EXPECT_EQ(std::optional<uint32_t>(0), *(*positions)->next());
+  EXPECT_EQ(std::optional<uint32_t>(1), *(*positions)->next());
+  EXPECT_FALSE((*cursor)->current_positions(**term, 139, true));
   EXPECT_EQ((*cursor)->next_batch()->count, 0u);
   EXPECT_EQ(*(*cursor)->advance(0), UINT32_MAX);
 }

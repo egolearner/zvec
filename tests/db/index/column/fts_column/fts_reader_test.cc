@@ -21,6 +21,7 @@
 #include "db/index/column/fts_column/fts_ast_rewriter.h"
 #include "db/index/column/fts_column/fts_field.h"
 #include "db/index/column/fts_column/fts_indexer.h"
+#include "db/index/column/fts_column/fts_writing_reader.h"
 #include "db/index/column/fts_column/parser/fts_query_parser.h"
 
 namespace zvec::fts {
@@ -171,6 +172,48 @@ TEST_F(FtsReaderTest, RepeatedPhraseTermsShareStorageAndAdvanceIndependently) {
   EXPECT_EQ(0u, (*first)->next().value());
   EXPECT_EQ(2u, (*first)->next().value());
   EXPECT_EQ(0u, (*last)->next().value());
+}
+
+TEST_F(FtsReaderTest, WritingPhraseReusesPositionedPostings) {
+  build(64);
+  FtsQueryParser parser;
+  auto phrase = parser.parse("\"alpha beta\"", pipeline_);
+  ASSERT_TRUE(phrase);
+  for (bool mmap : {true, false}) {
+    uint64_t direct_reads = 0;
+    std::vector<FtsResult> expected;
+    for (bool joined : {false, true}) {
+      auto file = FtsContainerReader::Open(custom_path_, mmap, 16u << 20);
+      ASSERT_TRUE(file);
+      auto field = FtsFieldReader::Open(*file, 0);
+      ASSERT_TRUE(field);
+      auto reader = OpenCustomFtsReader(*field);
+      ASSERT_TRUE(reader);
+      if (joined) {
+        reader = OpenWritingFtsReader({*reader}, {64});
+        ASSERT_TRUE(reader);
+      }
+      FtsColumnIndexer column;
+      ASSERT_TRUE(column.open_reader("text", *reader));
+      FtsQueryParams params;
+      params.topk = 64;
+      const auto before = (*file)->read_stats().range_reads;
+      auto hits = column.search(*phrase, params);
+      ASSERT_TRUE(hits && !hits->empty());
+      const auto reads = (*file)->read_stats().range_reads - before;
+      if (!joined) {
+        expected = *hits;
+        direct_reads = reads;
+        continue;
+      }
+      ASSERT_EQ(expected.size(), hits->size());
+      for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i].doc_id, (*hits)[i].doc_id);
+        EXPECT_EQ(expected[i].score, (*hits)[i].score);
+      }
+      EXPECT_LE(reads, direct_reads);
+    }
+  }
 }
 
 TEST_F(FtsReaderTest, DifferentialQueriesPreserveResultsScoresAndTies) {

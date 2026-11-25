@@ -68,6 +68,21 @@ class JoinedPosting final : public FtsReadPosting {
     return result;
   }
 
+  Result<FtsReadPosition::Ptr> current_positions(const FtsReadTerm &,
+                                                 uint32_t row,
+                                                 bool retain_windows) override {
+    if (!status_.ok()) {
+      return tl::make_unexpected(status_);
+    }
+    if (!cursor_ || row != doc_ || row == UINT32_MAX) {
+      return tl::make_unexpected(Status::FailedPrecondition(
+          "Writing posting is not at the requested row"));
+    }
+    const auto &part = (*parts_)[part_];
+    return cursor_->current_positions(*part.term, row - part.begin,
+                                      retain_windows);
+  }
+
   Result<FtsPostingBatch> next_batch() override {
     if (!status_.ok()) {
       return tl::make_unexpected(status_);

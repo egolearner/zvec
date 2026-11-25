@@ -457,6 +457,7 @@ void FtsReadRange::swap(FtsReadRange &other) noexcept {
   swap(segment_, other.segment_);
   swap(block_, other.block_);
   swap(length_, other.length_);
+  swap(skip_, other.skip_);
 }
 
 bool FtsReadBudget::try_acquire(size_t bytes) {
@@ -638,12 +639,11 @@ FtsContainerReader::Pointer FtsContainerReader::scan_view() {
   const size_t page =
       std::max<size_t>(metadata_.layout_granule,
                        std::max(ailego::kVectorPageSize, kChecksumPage));
-  if (budget_->limit_ < 2 * 16 * 8 * (4 * page + ScanWindows::kBytes)) {
-    return shared_from_this();
-  }
   Pointer view(new FtsContainerReader());
+  if (budget_->limit_ >= 2 * 16 * 8 * (4 * page + ScanWindows::kBytes)) {
+    view->scan_windows_ = std::make_shared<ScanWindows>();
+  }
   view->scan_base_ = shared_from_this();
-  view->scan_windows_ = std::make_shared<ScanWindows>();
   view->storage_ = storage_;
   view->buffer_pool_ = buffer_pool_;
   return view;
@@ -653,8 +653,8 @@ Result<FtsReadRange> FtsContainerReader::scan_range(const std::string &section,
                                                     uint64_t offset,
                                                     uint64_t length) {
   constexpr size_t kWindow = ScanWindows::kBytes;
-  if (length == 0 || length > kWindow) {
-    return scan_base_->read(section, offset, length);
+  if (!scan_windows_ || length == 0 || length > kWindow) {
+    return scan_base_->read_range(section, offset, length, true);
   }
   std::lock_guard lock(scan_windows_->mutex);
   for (auto &window : scan_windows_->sections) {
@@ -681,11 +681,12 @@ Result<FtsReadRange> FtsContainerReader::scan_range(const std::string &section,
                             window.range->view().size())) {
       window.range.reset();
       window.begin = offset;
-      auto bytes = scan_base_->read(
-          section, offset, std::min<uint64_t>(kWindow, window.size - offset));
+      auto bytes = scan_base_->read_range(
+          section, offset, std::min<uint64_t>(kWindow, window.size - offset),
+          true);
       if (!bytes) {
         if (bytes.error().code() == StatusCode::RESOURCE_EXHAUSTED) {
-          return scan_base_->read(section, offset, length);
+          return scan_base_->read_range(section, offset, length, true);
         }
         return tl::make_unexpected(bytes.error());
       }
@@ -701,7 +702,7 @@ Result<FtsReadRange> FtsContainerReader::scan_range(const std::string &section,
         data + (offset - window.begin));
     return slice;
   }
-  return scan_base_->read(section, offset, length);
+  return scan_base_->read_range(section, offset, length, true);
 }
 
 Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
@@ -710,6 +711,12 @@ Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
   if (scan_base_) {
     return scan_range(section_name, offset, length);
   }
+  return read_range(section_name, offset, length, false);
+}
+
+Result<FtsReadRange> FtsContainerReader::read_range(
+    const std::string &section_name, uint64_t offset, uint64_t length,
+    bool verify) {
   const format::SectionMetadata *meta = nullptr;
   for (const auto &section : metadata_.sections) {
     if (section.name == section_name) {
@@ -727,6 +734,17 @@ Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
   FtsReadRange range;
   if (length == 0) {
     return range;
+  }
+  const auto requested = length;
+  const auto granule = metadata_.layout_granule;
+  if (verify) {
+    // Read whole checksum chunks once. Return a slice of exactly the bytes
+    // verified below, using the same storage pin and budget reservation.
+    range.skip_ = offset % granule;
+    const uint64_t end = offset + length;
+    const uint64_t tail = granule - 1 - (end - 1) % granule;
+    offset -= range.skip_;
+    length += range.skip_ + std::min(tail, meta->length - end);
   }
   range.segment_ = storage_->get(section_name);
   if (!range.segment_) {
@@ -761,12 +779,25 @@ Result<FtsReadRange> FtsContainerReader::read(const std::string &section_name,
     return tl::make_unexpected(lease.error());
   }
   range.lease_ = std::move(*lease);
-  range.length_ = static_cast<size_t>(length);
+  range.length_ = static_cast<size_t>(requested);
   range_reads_.fetch_add(1, std::memory_order_relaxed);
   if (range.segment_->read(static_cast<size_t>(offset), range.block_,
-                           range.length_) != range.length_ ||
+                           static_cast<size_t>(length)) != length ||
       range.block_.data() == nullptr) {
     return tl::make_unexpected(IoError());
+  }
+  if (verify) {
+    std::string_view bytes(static_cast<const char *>(range.block_.data()),
+                           length);
+    uint64_t chunk = offset / granule;
+    while (!bytes.empty()) {
+      auto part = bytes.substr(0, granule);
+      auto status = verify_chunk(*meta, chunk++, part);
+      if (!status.ok()) {
+        return tl::make_unexpected(status);
+      }
+      bytes.remove_prefix(part.size());
+    }
   }
   return range;
 }
@@ -779,18 +810,10 @@ Result<FtsReadRange> FtsContainerReader::read_verified_chunk(
   if (offset >= section.length || offset % metadata_.layout_granule != 0) {
     return tl::make_unexpected(Corrupt());
   }
-  auto range = read(
+  return read_range(
       section.name, offset,
-      std::min<uint64_t>(metadata_.layout_granule, section.length - offset));
-  if (!range) {
-    return range;
-  }
-  auto status =
-      verify_chunk(section, offset / metadata_.layout_granule, range->view());
-  if (!status.ok()) {
-    return tl::make_unexpected(status);
-  }
-  return range;
+      std::min<uint64_t>(metadata_.layout_granule, section.length - offset),
+      true);
 }
 
 Status FtsContainerReader::verify_all() {

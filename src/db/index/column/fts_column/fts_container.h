@@ -103,7 +103,7 @@ class FtsReadRange {
     if (length_ == 0) {
       return {};
     }
-    return {static_cast<const char *>(block_.data()), length_};
+    return {static_cast<const char *>(block_.data()) + skip_, length_};
   }
 
  private:
@@ -113,6 +113,7 @@ class FtsReadRange {
   core::IndexStorage::Segment::Pointer segment_;
   core::IndexStorage::MemoryBlock block_;
   size_t length_{0};
+  size_t skip_{0};
 };
 
 class FtsContainerReader
@@ -131,7 +132,8 @@ class FtsContainerReader
                               std::shared_ptr<FtsReadBudget> read_budget,
                               std::shared_ptr<void> file_owner);
   // A single-field merge scans each of eight sections in dictionary order.
-  // Keep one charged read window per section across successive term cursors.
+  // Authenticate every checksum chunk used by the rewrite. Where the budget
+  // permits, reuse one charged window per section across term cursors.
   // The windows die with this scan and never enter the query-facing reader.
   Pointer scan_view();
   bool paged_queries() const {
@@ -149,8 +151,7 @@ class FtsContainerReader
   // Read and authenticate one complete source chunk before copying it.
   Result<FtsReadRange> read_verified_chunk(
       const format::SectionMetadata &section, uint64_t offset);
-  // Explicit diagnostic only. Normal open/read/publication do not scan data
-  // checksums, matching the vector storage's default validation policy.
+  // Full diagnostic scan. Normal query reads do not hash posting data.
   Status verify_all();
 
   struct ReadStats {
@@ -174,6 +175,8 @@ class FtsContainerReader
   Result<std::shared_ptr<Lease>> reserve(size_t bytes);
   Status verify_chunk(const format::SectionMetadata &meta, uint64_t chunk,
                       std::string_view bytes);
+  Result<FtsReadRange> read_range(const std::string &section, uint64_t offset,
+                                  uint64_t length, bool verify);
   Result<FtsReadRange> scan_range(const std::string &section, uint64_t offset,
                                   uint64_t length);
   struct ScanWindows;

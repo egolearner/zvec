@@ -49,6 +49,11 @@ class CustomPosting final : public FtsReadPosting {
     }
     return FtsReadPayload{tf_, *length};
   }
+  Result<MergePayload> merge_payload() override {
+    // The writer already copied and checked the source document table. It
+    // validates TF against that length when appending this posting.
+    return MergePayload{tf_, std::nullopt};
+  }
   Result<Bound> bound(uint32_t target, float boost) override {
     return cursor_->bound(target, boost);
   }
@@ -159,6 +164,14 @@ class CustomReader final : public FtsSegmentReader {
 };
 
 }  // namespace
+
+Result<FtsReadPosting::MergePayload> FtsReadPosting::merge_payload() {
+  auto value = payload();
+  if (!value) {
+    return tl::make_unexpected(value.error());
+  }
+  return MergePayload{value->tf, value->length};
+}
 
 Result<FtsReadPosition::Ptr> FtsReadPosting::current_positions(
     const FtsReadTerm &term, uint32_t doc, bool) {

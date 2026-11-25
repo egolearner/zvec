@@ -986,6 +986,12 @@ size_t tokenize_unicode_prefix(const std::string &text, uint32_t max_length,
     size_t lookahead = 0;
     while (stop > 0 && lookahead < 2) {
       const auto &point = points[--stop];
+      // ASCII whitespace is a definite boundary even without lookahead.
+      if (point.cp == ' ' || point.cp == '\t' || point.cp == '\r' ||
+          point.cp == '\n') {
+        ++stop;
+        break;
+      }
       if (text.size() - point.end >= 3 && !is_ignored(point.cls)) {
         ++lookahead;
       }
@@ -993,7 +999,21 @@ size_t tokenize_unicode_prefix(const std::string &text, uint32_t max_length,
   }
   uint32_t position = 0;
   size_t start = 0;
-  while (start < stop) {
+  while (start < points.size()) {
+    if (start >= stop) {
+      // A leading separator or ordinary combining mark cannot begin a
+      // token. It needs no lookahead, but keep incomplete UTF-8 and any
+      // possible token start (including keycaps and emoji modifiers).
+      const auto &point = points[start];
+      if (text.size() - point.end < 3 || is_token_start(point.cls) ||
+          point.cls == WordBreakClass::ZWJ ||
+          point.cls == WordBreakClass::ExtendNumLet || is_keycap_base(point) ||
+          point.emoji_modifier || point.emoji_modifier_base) {
+        break;
+      }
+      ++start;
+      continue;
+    }
     const auto span = scan_unicode_span(points, start);
     if (span.end > stop) {
       break;

@@ -1278,6 +1278,37 @@ TEST_P(FtsSegmentPublicationTest, DestroyWaitsForIndependentFtsQueryOwner) {
   }
 }
 
+TEST_P(FtsSegmentPublicationTest,
+       RecoveryChargesPinnedDirectoriesUntilDeletion) {
+  ASSERT_TRUE(segment_->flush().ok());
+  auto version = versions_->get_current_version();
+  version.reset_writing_segment_meta(segment_->meta());
+  ASSERT_TRUE(versions_->commit(version).ok());
+  ASSERT_TRUE(versions_->reclaim_unreferenced_files().ok());
+  auto retirement = versions_->fts_retirement();
+  const auto dir = FileHelper::MakeSegmentPath(path_, segment_->id());
+  for (const auto *name :
+       {"fts.999.rocksdb",
+        "fts.999.1.00000000000000000000000000000001.run.reserved"}) {
+    const auto orphan = dir + "/" + name;
+    ASSERT_TRUE(std::filesystem::create_directories(orphan + "/nested"));
+    std::ofstream(orphan + "/one").put('a');
+    std::ofstream(orphan + "/nested/two").put('b');
+    std::filesystem::resize_file(orphan + "/nested/two", 65535);
+    std::filesystem::create_directory_symlink(std::filesystem::absolute(path_),
+                                              orphan + "/outside");
+    auto pin = retirement->track(orphan, true, false);
+    const auto baseline = retirement->retired_bytes();
+    ASSERT_TRUE(versions_->reclaim_unreferenced_files().ok());
+    EXPECT_EQ(baseline + 65536, retirement->retired_bytes());
+    ASSERT_TRUE(versions_->reclaim_unreferenced_files().ok());
+    EXPECT_EQ(baseline + 65536, retirement->retired_bytes());
+    pin.reset();
+    EXPECT_EQ(baseline, retirement->retired_bytes());
+    EXPECT_FALSE(std::filesystem::exists(orphan));
+  }
+}
+
 TEST_P(FtsSegmentPublicationTest, SuccessorFailureAndRepeatedSwitch) {
   SegmentManager segments;
   auto failed = segments.switch_fts_writer(

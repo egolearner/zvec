@@ -95,7 +95,7 @@ Status CopyPostings(Input &input, const roaring::Roaring &deletions,
     if (deletions.contains(scan_row)) {
       continue;
     }
-    auto payload = (*postings)->payload();
+    auto payload = (*postings)->merge_payload();
     if (!payload) {
       return payload.error();
     }
@@ -115,7 +115,7 @@ Status CopyPostings(Input &input, const roaring::Roaring &deletions,
         static_cast<uint32_t>(scan_row - deletions.rank(scan_row));
     auto status = writer->add_posting(
         target, payload->tf, [&]() { return (*positions)->next(); },
-        payload->length);
+        payload->expected_length);
     if (!status.ok()) {
       return status;
     }
